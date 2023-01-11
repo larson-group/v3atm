@@ -53,6 +53,11 @@ module constants_clubb
   ! Maximum variable name length in CLUBB GrADS or netCDF output
   integer, parameter, public ::  & 
     var_length = 30
+
+  ! Number of neighboring points to draw from in the hole filling algorithm
+  integer, parameter, public :: &
+    num_hf_draw_points = 2
+
   ! The parameter parab_cyl_max_input is the largest magnitude that the input to
   ! the parabolic cylinder function is allowed to have.  When the value of the
   ! input to the parabolic cylinder function is too large in magnitude
@@ -129,7 +134,8 @@ module constants_clubb
 #else
 
   real( kind = core_rknd ), parameter, public ::  & 
-    pi = 3.141592654_core_rknd ! The ratio of radii to their circumference
+    pi = 3.141592654_core_rknd, &       ! The ratio of radii to their circumference
+    invrs_pi = 0.31830988618_core_rknd  ! 1 / pi
 
   real( kind = dp ), parameter, public :: &
     radians_per_deg_dp = pi_dp / 180._dp
@@ -399,6 +405,9 @@ module constants_clubb
 
   real( kind = core_rknd ), parameter, public :: &
     cloud_frac_min = 0.005_core_rknd ! Threshold for cloud fractions
+
+  real( kind = core_rknd ), parameter, public :: &
+    wp2_max = 1000._core_rknd ! Max value for variance clipping
 
   !-----------------------------------------------------------------------------
   ! Useful conversion factors.

@@ -10,471 +10,271 @@ module fill_holes
             hole_filling_hm_one_lev, &
             fill_holes_hydromet, &
             fill_holes_wv, &
-            vertical_avg, &
-            vertical_integral, &
             clip_hydromet_conc_mvr, &
             setup_stats_indices
-
-  private :: fill_holes_multiplicative
 
   private ! Set Default Scope
 
   contains
 
   !=============================================================================
-  subroutine fill_holes_vertical( num_draw_pts, threshold, field_grid, &
-                                  rho_ds, rho_ds_zm, &
+  subroutine fill_holes_vertical( nz, ngrdcol, num_draw_pts, threshold, upper_hf_level, &
+                                  dz, rho_ds, &
                                   field )
 
     ! Description:
-    ! This subroutine clips values of 'field' that are below 'threshold' as much
-    ! as possible (i.e. "fills holes"), but conserves the total integrated mass
-    ! of 'field'.  This prevents clipping from acting as a spurious source.
+    !   This subroutine clips values of 'field' that are below 'threshold' as much
+    !   as possible (i.e. "fills holes"), but conserves the total integrated mass
+    !   of 'field'.  This prevents clipping from acting as a spurious source.
     !
-    ! Mass is conserved by reducing the clipped field everywhere by a constant
-    ! multiplicative coefficient.
+    !   Mass is conserved by reducing the clipped field everywhere by a constant
+    !   multiplicative coefficient.
     !
-    ! This subroutine does not guarantee that the clipped field will exceed
-    ! threshold everywhere; blunt clipping is needed for that.
-
+    !   This subroutine does not guarantee that the clipped field will exceed
+    !   threshold everywhere; blunt clipping is needed for that.
+    !
+    !   The lowest level (k=1) should not be included, as the hole-filling scheme
+    !   should not alter the set value of 'field' at the surface (for momentum
+    !   level variables), or consider the value of 'field' at a level below the
+    !   surface (for thermodynamic level variables).  
+    !
+    !   For momentum level variables only, the hole-filling scheme should not 
+    !   alter the set value of 'field' at the upper boundary level (k=nz).
+    !   So for momemtum level variables, call with upper_hf_level=nz-1, and
+    !   for thermodynamic level variables, call with upper_hf_level=nz.
+    !
     ! References:
     !   ``Numerical Methods for Wave Equations in Geophysical Fluid
     !     Dynamics'', Durran (1999), p. 292.
     !-----------------------------------------------------------------------
 
     use grid_class, only: & 
-       gr ! Variable
+        grid ! Type
 
     use clubb_precision, only: &
-      core_rknd ! Variable(s)
+        core_rknd ! Variable(s)
+
+    use constants_clubb, only: &
+        eps
 
     implicit none
-
-    ! Input variables
+    
+    ! --------------------- Input variables ---------------------
+    integer, intent(in) :: &
+      nz, &
+      ngrdcol
+    
+    real( kind = core_rknd ), dimension(ngrdcol,nz) :: &
+      dz      ! Spacing between thermodynamic grid levels; centered over
+              ! momentum grid levels
+              ! OR
+              ! Spcaing between momentum grid levels; centered over
+              ! thermodynamic grid levels
+                  
     integer, intent(in) :: & 
-      num_draw_pts  ! The number of points on either side of the hole;
-               ! Mass is drawn from these points to fill the hole.  []
+      num_draw_pts, & ! The number of points on either side of the hole;
+                      ! Mass is drawn from these points to fill the hole.  []
+      upper_hf_level  ! Upper grid level of global hole-filling range      []
 
     real( kind = core_rknd ), intent(in) :: & 
       threshold  ! A threshold (e.g. w_tol*w_tol) below which field must not
                  ! fall                           [Units vary; same as field]
 
-    character(len=2), intent(in) :: & 
-      field_grid ! The grid of the field, either zt or zm
+    real( kind = core_rknd ), dimension(ngrdcol,nz), intent(in) ::  & 
+      rho_ds       ! Dry, static density on thermodynamic or momentum levels    [kg/m^3]
 
-    real( kind = core_rknd ), dimension(gr%nz), intent(in) ::  & 
-      rho_ds,    & ! Dry, static density on thermodynamic levels    [kg/m^3]
-      rho_ds_zm    ! Dry, static density on momentum levels         [kg/m^3]
-
-    ! Input/Output variable
-    real( kind = core_rknd ), dimension(gr%nz), intent(inout) :: & 
+    ! --------------------- Input/Output variable ---------------------
+    real( kind = core_rknd ), dimension(ngrdcol,nz), intent(inout) :: & 
       field  ! The field (e.g. wp2) that contains holes [Units same as threshold]
-
-    ! Local Variables
+ 
+    ! --------------------- Local Variables ---------------------
     integer :: & 
+      i,             & ! Loop index for column                           []
       k,             & ! Loop index for absolute grid level              []
-      begin_idx,     & ! Lower grid level of local hole-filling range    []
-      end_idx,       & ! Upper grid level of local hole-filling range    []
-      upper_hf_level   ! Upper grid level of global hole-filling range   []
+      j, &
+      k_start,     & ! Lower grid level of local hole-filling range    []
+      k_end          ! Upper grid level of local hole-filling range    []
 
-    !-----------------------------------------------------------------------
+    real( kind = core_rknd ), dimension(ngrdcol,nz)  ::  & 
+      denom_integral, & ! Integral in the denominator (see description)
+      field_clipped     ! The raw field (e.g. wp2) that contains no holes
+                        !                          [Units same as threshold]
 
-    ! Check whether any holes exist in the entire profile.
-    ! The lowest level (k=1) should not be included, as the hole-filling scheme
-    ! should not alter the set value of 'field' at the surface (for momentum
-    ! level variables), or consider the value of 'field' at a level below the
-    ! surface (for thermodynamic level variables).  For momentum level variables
-    ! only, the hole-filling scheme should not alter the set value of 'field' at
-    ! the upper boundary level (k=gr%nz).
+    real( kind = core_rknd ) ::  & 
+      field_avg,          & ! Vertical average of field [Units of field]
+      field_clipped_avg,  & ! Vertical average of clipped field [Units of field]
+      mass_fraction         ! Coefficient that multiplies clipped field
+                            ! in order to conserve mass.                      []
 
-    if ( field_grid == "zt" ) then
-      ! 'field' is on the zt (thermodynamic level) grid
-      upper_hf_level = gr%nz
-    elseif ( field_grid == "zm" )  then
-      ! 'field' is on the zm (momentum level) grid
-      upper_hf_level = gr%nz-1
-    endif
+    real( kind = core_rknd ), dimension(ngrdcol) ::  & 
+      denom_integral_global,  & ! Integral in the denominator for global filling
+      numer_integral_global,  & ! Integral in the numerator for global filling
+      field_avg_global,       & ! Vertical average of field [Units of field]
+      mass_fraction_global      ! Coefficient that multiplies clipped field
+                                ! in order to conserve mass.                      []
 
-    if ( any( field( 2:upper_hf_level ) < threshold ) ) then
+    ! --------------------- Begin Code --------------------- 
+
+    ! If all field values are above the specified threshold, no hole filling is required
+    if ( all( field >= threshold ) ) then
+      return
+    end if
+
+    ! denom_integral does not change throughout the hole filling algorithm
+    ! so we can calculate it before hand. This results in unneccesary computations,
+    ! but is parallelizable and reduces the cost of the serial k loop
+    do i = 1, ngrdcol
+      do k = 2+num_draw_pts, upper_hf_level-num_draw_pts
+        k_start = k - num_draw_pts
+        k_end   = k + num_draw_pts
+        denom_integral(i,k) = sum( rho_ds(i,k_start:k_end) * dz(i,k_start:k_end) )
+      end do  
+    end do
+
+    
+    do i = 1, ngrdcol
 
       ! Make one pass up the profile, filling holes as much as we can using
-      ! nearby mass.
-      ! The lowest level (k=1) should not be included in the loop, as the
-      ! hole-filling scheme should not alter the set value of 'field' at the
-      ! surface (for momentum level variables), or consider the value of
-      ! 'field' at a level below the surface (for thermodynamic level
-      ! variables).  For momentum level variables only, the hole-filling scheme
-      ! should not alter the set value of 'field' at the upper boundary
-      ! level (k=gr%nz).
-      do k = 2+num_draw_pts, upper_hf_level-num_draw_pts, 1
+      ! nearby mass, ignoring the first level.
+      !
+      ! This loop can only be done in serial due to the field values required for the next
+      ! iteration potentially changing. We could in theory expose more parallelism in cases 
+      ! where there are large enough gaps between vertical levels which need hole-filling,
+      ! but levels which require hole-filling are often close or consecutive.
+      do k = 2+num_draw_pts, upper_hf_level-num_draw_pts
 
-        begin_idx = k - num_draw_pts
-        end_idx   = k + num_draw_pts
+        k_start = k - num_draw_pts
+        k_end   = k + num_draw_pts
 
-        if ( any( field( begin_idx:end_idx ) < threshold ) ) then
+        if ( any( field(i,k_start:k_end) < threshold ) ) then
 
-          ! 'field' is on the zt (thermodynamic level) grid
-          if ( field_grid == "zt" ) then
-            call fill_holes_multiplicative &
-                    ( begin_idx, end_idx, threshold, &
-                      rho_ds(begin_idx:end_idx), gr%dzt(begin_idx:end_idx), &
-                      field(begin_idx:end_idx) )
-                      
-          ! 'field' is on the zm (momentum level) grid
-          elseif ( field_grid == "zm" )  then
-            call fill_holes_multiplicative &
-                    ( begin_idx, end_idx, threshold, &
-                      rho_ds_zm(begin_idx:end_idx), gr%dzm(begin_idx:end_idx), &
-                      field(begin_idx:end_idx) )
+          ! Compute the field's vertical average cenetered at k, which we must conserve,
+          ! see description of the vertical_avg function in advance_helper_module
+          field_avg = sum( rho_ds(i,k_start:k_end) * dz(i,k_start:k_end) &
+                           * field(i,k_start:k_end) ) &
+                      / denom_integral(i,k)
+
+          ! Clip small or negative values from field.
+          if ( field_avg >= threshold ) then
+            ! We know we can fill in holes completely
+            field_clipped(i,k_start:k_end) = max( threshold, field(i,k_start:k_end) )
+          else
+            ! We can only fill in holes partly;
+            ! to do so, we remove all mass above threshold.
+            field_clipped(i,k_start:k_end) = min( threshold, field(i,k_start:k_end) )
+          endif
+
+          ! Compute the clipped field's vertical integral.
+          ! clipped_total_mass >= original_total_mass,
+          ! see description of the vertical_avg function in advance_helper_module
+          field_clipped_avg = sum( rho_ds(i,k_start:k_end) * dz(i,k_start:k_end) &
+                                   * field_clipped(i,k_start:k_end) ) &
+                              / denom_integral(i,k)
+
+          ! Avoid divide by zero issues by doing nothing if field_clipped_avg ~= threshold
+          if ( abs(field_clipped_avg-threshold) > abs(field_clipped_avg+threshold)*eps/2) then
+            ! Compute coefficient that makes the clipped field have the same mass as the
+            ! original field.  We should always have mass_fraction > 0.
+            mass_fraction = ( field_avg - threshold ) &
+                            / ( field_clipped_avg - threshold )
+
+            ! Calculate normalized, filled field
+            field(i,k_start:k_end) = threshold &
+                        + mass_fraction * ( field_clipped(i,k_start:k_end) - threshold )
           endif
 
         endif
 
-      enddo
+      end do
 
-      ! Fill holes globally, to maximize the chance that all holes are filled.
-      ! The lowest level (k=1) should not be included, as the hole-filling
-      ! scheme should not alter the set value of 'field' at the surface (for
-      ! momentum level variables), or consider the value of 'field' at a level
-      ! below the surface (for thermodynamic level variables).  For momentum
-      ! level variables only, the hole-filling scheme should not alter the set
-      ! value of 'field' at the upper boundary level (k=gr%nz).
-      if ( any( field( 2:upper_hf_level ) < threshold ) ) then
+    end do
 
-        ! 'field' is on the zt (thermodynamic level) grid
-        if ( field_grid == "zt" ) then
-          call fill_holes_multiplicative &
-                 ( 2, upper_hf_level, threshold, &
-                   rho_ds(2:upper_hf_level), gr%dzt(2:upper_hf_level), &
-                   field(2:upper_hf_level) )
-                   
-        ! 'field' is on the zm (momentum level) grid
-        elseif ( field_grid == "zm" )  then
-            call fill_holes_multiplicative &
-                 ( 2, upper_hf_level, threshold, &
-                   rho_ds_zm(2:upper_hf_level), gr%dzm(2:upper_hf_level), &
-                   field(2:upper_hf_level) )
-        endif
+    ! If all the holes have been filled, return 
+    if ( all( field >= threshold ) ) then
+      return
+    end if
 
+
+    ! Now we fill holes globally to maximize the chance that all holes are filled.
+    ! To improve parallelism we assume that global hole filling needs to be done 
+    ! for each grid column, perform all calculations required, and only check
+    ! if any holes need filling before the final step of updating the field. 
+
+    ! Compute the numerator and denominator integrals
+    numer_integral_global = 0.0_core_rknd
+    denom_integral_global = 0.0_core_rknd
+    do i = 1, ngrdcol
+      do k = 2, upper_hf_level
+        numer_integral_global(i) = numer_integral_global(i) + rho_ds(i,k)  &
+                                                              * dz(i,k)    &
+                                                              * field(i,k)
+
+        denom_integral_global(i) = denom_integral_global(i) + rho_ds(i,k) * dz(i,k)
+      end do  
+    end do
+
+    
+    do i = 1, ngrdcol
+
+      ! Find the vertical average of field, using the precomputed numerator and denominator,
+      ! see description of the vertical_avg function in advance_helper_module
+      field_avg_global(i) = numer_integral_global(i) / denom_integral_global(i)
+
+      ! Clip small or negative values from field.
+      if ( field_avg_global(i) >= threshold ) then
+        ! We know we can fill in holes completely
+        field_clipped(i,2:upper_hf_level) = max( threshold, field(i,2:upper_hf_level) )
+      else
+        ! We can only fill in holes partly;
+        ! to do so, we remove all mass above threshold.
+        field_clipped(i,2:upper_hf_level) = min( threshold, field(i,2:upper_hf_level) )
       endif
 
-    endif  ! End overall check for existence of holes
+    end do
+
+    ! To compute the clipped field's vertical integral we only need to recompute the numerator
+    numer_integral_global = 0.0_core_rknd
+    do i = 1, ngrdcol
+      do k = 2, upper_hf_level
+        numer_integral_global(i) = numer_integral_global(i) + rho_ds(i,k)  &
+                                                              * dz(i,k)    &
+                                                              * field_clipped(i,k)
+      end do  
+    end do
+
+    do i = 1, ngrdcol
+
+      ! Do not complete calculations or update field values for this 
+      ! column if there are no holes that need filling
+      if ( any( field(i,2:upper_hf_level) < threshold ) ) then
+
+        ! Compute the clipped field's vertical integral,
+        ! see description of the vertical_avg function in advance_helper_module
+        field_clipped_avg = numer_integral_global(i) / denom_integral_global(i)
+
+        ! Avoid divide by zero issues by doing nothing if field_clipped_avg ~= threshold
+        if ( abs(field_clipped_avg-threshold) > abs(field_clipped_avg+threshold)*eps/2) then
+
+          ! Compute coefficient that makes the clipped field have the same mass as the
+          ! original field.  We should always have mass_fraction > 0.
+          mass_fraction_global(i) = ( field_avg_global(i) - threshold ) &
+                                    / ( field_clipped_avg - threshold )
+
+          ! Calculate normalized, filled field
+          field(i,2:upper_hf_level) = threshold + mass_fraction_global(i) &
+                                                  * ( field_clipped(i,2:upper_hf_level) &
+                                                      - threshold )
+        end if
+      end if
+
+    end do
+
 
     return
 
   end subroutine fill_holes_vertical
 
-  !=============================================================================
-  subroutine fill_holes_multiplicative &
-                 ( begin_idx, end_idx, threshold, &
-                   rho, dz, &
-                   field )
-
-    ! Description:
-    ! This subroutine clips values of 'field' that are below 'threshold' as much
-    ! as possible (i.e. "fills holes"), but conserves the total integrated mass
-    ! of 'field'.  This prevents clipping from acting as a spurious source.
-    !
-    ! Mass is conserved by reducing the clipped field everywhere by a constant
-    ! multiplicative coefficient.
-    !
-    ! This subroutine does not guarantee that the clipped field will exceed
-    ! threshold everywhere; blunt clipping is needed for that.
-
-    ! References:
-    ! ``Numerical Methods for Wave Equations in Geophysical Fluid
-    ! Dynamics", Durran (1999), p. 292.
-    !-----------------------------------------------------------------------
-
-    use constants_clubb, only: &
-      eps
-
-    use clubb_precision, only: &
-      core_rknd ! Variable(s)
-
-    implicit none
-
-    ! Input variables
-    integer, intent(in) :: & 
-      begin_idx, & ! The beginning index (e.g. k=2) of the range of hole-filling 
-      end_idx      ! The end index (e.g. k=gr%nz) of the range of hole-filling
-
-    real( kind = core_rknd ), intent(in) :: & 
-      threshold  ! A threshold (e.g. w_tol*w_tol) below which field must not fall
-                 !                              [Units vary; same as field]
-
-    real( kind = core_rknd ), dimension(end_idx-begin_idx+1), intent(in) ::  & 
-      rho,     &  ! Dry, static density on either thermodynamic or momentum levels   [kg/m^3]
-      dz          ! Reciprocal of thermodynamic or momentum level thickness depending on whether
-                  ! we're on zt or zm grid.
-
-    ! Input/Output variable
-    real( kind = core_rknd ), dimension(end_idx-begin_idx+1), intent(inout) ::  & 
-      field  ! The field (e.g. wp2) that contains holes
-             !                                  [Units same as threshold]
-
-    ! Local Variables
-    real( kind = core_rknd ), dimension(end_idx-begin_idx+1)  ::  & 
-      field_clipped  ! The raw field (e.g. wp2) that contains no holes
-                     !                          [Units same as threshold]
-
-    real( kind = core_rknd ) ::  & 
-      field_avg,  &        ! Vertical average of field [Units of field]
-      field_clipped_avg, & ! Vertical average of clipped field [Units of field]
-      mass_fraction        ! Coefficient that multiplies clipped field
-                           ! in order to conserve mass.                      []
-
-    !-----------------------------------------------------------------------
-
-    ! Compute the field's vertical average, which we must conserve.
-    field_avg = vertical_avg( (end_idx-begin_idx+1), rho, &
-                                  field, dz )
-
-    ! Clip small or negative values from field.
-    if ( field_avg >= threshold ) then
-      ! We know we can fill in holes completely
-      field_clipped = max( threshold, field )
-    else
-      ! We can only fill in holes partly;
-      ! to do so, we remove all mass above threshold.
-      field_clipped = min( threshold, field )
-    endif
-
-    ! Compute the clipped field's vertical integral.
-    ! clipped_total_mass >= original_total_mass
-    field_clipped_avg = vertical_avg( (end_idx-begin_idx+1), rho, &
-                                      field_clipped, dz )
-
-    ! If the difference between the field_clipped_avg and the threshold is so
-    ! small that it falls within numerical round-off, return to the parent
-    ! subroutine without altering the field in order to avoid divide-by-zero
-    ! error.
-    if ( abs(field_clipped_avg-threshold) <= abs(field_clipped_avg+threshold)*eps/2) then
-      return
-    endif
-
-    ! Compute coefficient that makes the clipped field have the same mass as the
-    ! original field.  We should always have mass_fraction > 0.
-    mass_fraction = ( field_avg - threshold ) / & 
-                          ( field_clipped_avg - threshold )
-
-    ! Output normalized, filled field
-    field = mass_fraction * ( field_clipped - threshold )  & 
-                 + threshold
-
-    return
-
-  end subroutine fill_holes_multiplicative
-
-  !=============================================================================
-  function vertical_avg( total_idx, rho_ds, field, dz )
-
-    ! Description:
-    ! Computes the density-weighted vertical average of a field.
-    !
-    ! The average value of a function, f, over a set domain, [a,b], is
-    ! calculated by the equation:
-    !
-    ! f_avg = ( INT(a:b) f*g ) / ( INT(a:b) g );
-    !
-    ! as long as f is continous and g is nonnegative and integrable.  Therefore,
-    ! the density-weighted (by dry, static, base-static density) vertical
-    ! average value of any model field, x, is calculated by the equation:
-    !
-    ! x_avg|_z = ( INT(z_bot:z_top) x rho_ds dz )
-    !            / ( INT(z_bot:z_top) rho_ds dz );
-    !
-    ! where z_bot is the bottom of the vertical domain, and z_top is the top of
-    ! the vertical domain.
-    !
-    ! This calculation is done slightly differently depending on whether x is a
-    ! thermodynamic-level or a momentum-level variable.
-    !
-    ! Thermodynamic-level computation:
-    
-    !
-    ! For numerical purposes, INT(z_bot:z_top) x rho_ds dz, which is the
-    ! numerator integral, is calculated as:
-    !
-    ! SUM(k_bot:k_top) x(k) rho_ds(k) delta_z(k);
-    !
-    ! where k is the index of the given thermodynamic level, x and rho_ds are
-    ! both thermodynamic-level variables, and delta_z(k) = zm(k) - zm(k-1).  The
-    ! indices k_bot and k_top are the indices of the respective lower and upper
-    ! thermodynamic levels involved in the integration.
-    !
-    ! Likewise, INT(z_bot:z_top) rho_ds dz, which is the denominator integral,
-    ! is calculated as:
-    !
-    ! SUM(k_bot:k_top) rho_ds(k) delta_z(k).
-    !
-    ! The first (k=1) thermodynamic level is below ground (or below the
-    ! official lower boundary at the first momentum level), so it should not
-    ! count in a vertical average, whether that vertical average is used for
-    ! the hole-filling scheme or for statistical purposes. Begin no lower
-    ! than level k=2, which is the first thermodynamic level above ground (or
-    ! above the model lower boundary).
-    !
-    ! For cases where hole-filling over the entire (global) vertical domain
-    ! is desired, or where statistics over the entire (global) vertical
-    ! domain are desired, the lower (thermodynamic-level) index of k = 2 and
-    ! the upper (thermodynamic-level) index of k = gr%nz, means that the
-    ! overall vertical domain will be gr%zm(gr%nz) - gr%zm(1).
-    !
-    !
-    ! Momentum-level computation:
-    !
-    ! For numerical purposes, INT(z_bot:z_top) x rho_ds dz, which is the
-    ! numerator integral, is calculated as:
-    !
-    ! SUM(k_bot:k_top) x(k) rho_ds(k) delta_z(k);
-    !
-    ! where k is the index of the given momentum level, x and rho_ds are both
-    ! momentum-level variables, and delta_z(k) = zt(k+1) - zt(k).  The indices
-    ! k_bot and k_top are the indices of the respective lower and upper momentum
-    ! levels involved in the integration.
-    !
-    ! Likewise, INT(z_bot:z_top) rho_ds dz, which is the denominator integral,
-    ! is calculated as:
-    !
-    ! SUM(k_bot:k_top) rho_ds(k) delta_z(k).
-    !
-    ! The first (k=1) momentum level is right at ground level (or right at
-    ! the official lower boundary).  The momentum level variables that call
-    ! the hole-filling scheme have set values at the surface (or lower
-    ! boundary), and those set values should not be changed.  Therefore, the
-    ! vertical average (for purposes of hole-filling) should not include the
-    ! surface level (or lower boundary level).  For hole-filling purposes,
-    ! begin no lower than level k=2, which is the second momentum level above
-    ! ground (or above the model lower boundary).  Likewise, the value at the
-    ! model upper boundary (k=gr%nz) is also set for momentum level
-    ! variables.  That value should also not be changed.
-    !
-    ! However, this function is also used to keep track (for statistical
-    ! purposes) of the vertical average of certain variables.  In that case,
-    ! the vertical average needs to be taken over the entire vertical domain
-    ! (level 1 to level gr%nz).
-    !
-    !
-    ! In both the thermodynamic-level computation and the momentum-level
-    ! computation, the numerator integral is divided by the denominator integral
-    ! in order to find the average value (over the vertical domain) of x.
-
-    ! References:
-    ! None
-    !-----------------------------------------------------------------------
-
-    use clubb_precision, only: &
-      core_rknd ! Variable(s)
-
-    implicit none
-
-    ! Input variables
-    integer, intent(in) :: & 
-      total_idx ! The total numer of indices within the range of averaging
-
-    real( kind = core_rknd ), dimension(total_idx), intent(in) ::  &
-      rho_ds, & ! Dry, static density on either thermodynamic or momentum levels    [kg/m^3]
-      field,  & ! The field (e.g. wp2) to be vertically averaged                    [Units vary]
-      dz  ! Reciprocal of thermodynamic or momentum level thickness           [1/m]
-                ! depending on whether we're on zt or zm grid.
-    ! Note:  The rho_ds and field points need to be arranged from
-    !        lowest to highest in altitude, with rho_ds(1) and
-    !        field(1) actually their respective values at level k = 1.
-
-    ! Output variable
-    real( kind = core_rknd ) :: & 
-      vertical_avg  ! Vertical average of field    [Units of field]
-
-    ! Local variables
-    real( kind = core_rknd ) :: & 
-      numer_integral, & ! Integral in the numerator (see description)
-      denom_integral    ! Integral in the denominator (see description)
-      
-
-    integer :: k
-
-    !-----------------------------------------------------------------------
-    
-    ! Initialize variable
-    numer_integral = 0.0_core_rknd
-    denom_integral = 0.0_core_rknd
-
-    ! Compute the numerator and denominator integral.
-    ! Multiply rho_ds at level k by the level thickness
-    ! at level k.  Then, sum over all vertical levels.
-    do k=1, total_idx
-
-        numer_integral = numer_integral + rho_ds(k) * dz(k) * field(k)
-        denom_integral = denom_integral + rho_ds(k) * dz(k)
-
-    end do
-
-    ! Find the vertical average of 'field'.
-    vertical_avg = numer_integral / denom_integral
-
-    return
-  end function vertical_avg
-
-  !=============================================================================
-  pure function vertical_integral( total_idx, rho_ds, &
-                                       field, dz )
-
-    ! Description:
-    ! Computes the vertical integral. rho_ds, field, and dz must all be
-    ! of size total_idx and should all start at the same index.
-    ! 
-    
-    ! References:
-    ! None
-    !-----------------------------------------------------------------------
-
-    use clubb_precision, only: &
-      core_rknd ! Variable(s)
-
-    implicit none
-
-    ! Input variables
-    integer, intent(in) :: & 
-      total_idx  ! The total numer of indices within the range of averaging
-
-    real( kind = core_rknd ), dimension(total_idx), intent(in) ::  &
-      rho_ds,  & ! Dry, static density                   [kg/m^3]
-      field,   & ! The field to be vertically averaged   [Units vary]
-      dz         ! Level thickness                       [1/m]
-    ! Note:  The rho_ds and field points need to be arranged from
-    !        lowest to highest in altitude, with rho_ds(1) and
-    !        field(1) actually their respective values at level k = begin_idx.
-
-    ! Local variables
-    real( kind = core_rknd ) :: &
-      vertical_integral ! Integral in the numerator (see description)
-
-    !-----------------------------------------------------------------------
-
-    !  Assertion checks: that begin_idx <= gr%nz - 1
-    !                    that end_idx   >= 2
-    !                    that begin_idx <= end_idx
-
-
-    ! Initializing vertical_integral to avoid a compiler warning.
-    vertical_integral = 0.0_core_rknd
-
-    ! Compute the integral.
-    ! Multiply the field at level k by rho_ds at level k and by
-    ! the level thickness at level k.  Then, sum over all vertical levels.
-    ! Note:  The values of the field and rho_ds are passed into this function
-    !        so that field(1) and rho_ds(1) are actually the field and rho_ds
-    !        at level k_start.
-    vertical_integral = sum( field * rho_ds * dz )
-
-    !print *, vertical_integral
-
-    return
-  end function vertical_integral
-
-!===============================================================================
-
+  !===============================================================================
   subroutine hole_filling_hm_one_lev( num_hm_fill, hm_one_lev, & ! Intent(in)
                                    hm_one_lev_filled ) ! Intent(out)
 
@@ -770,7 +570,7 @@ module fill_holes
           case( "rim", "rsm", "rgm" )
              thlm_mc(k) = thlm_mc(k) - rvm_clip_tndcy * ( Ls / ( Cp*exner(k) ) )
           case default
-             stop "Fatal error in microphys_driver"
+             error stop "Fatal error in microphys_driver"
           end select
 
           ! Set the mixing ratio to 0
@@ -785,9 +585,10 @@ module fill_holes
   !-----------------------------------------------------------------------
 
   !-----------------------------------------------------------------------
-  subroutine fill_holes_driver( nz, dt, hydromet_dim,        & ! Intent(in)
+  subroutine fill_holes_driver( gr, nz, dt, hydromet_dim,        & ! Intent(in)
                                 l_fill_holes_hm,             & ! Intent(in)
                                 rho_ds_zm, rho_ds_zt, exner, & ! Intent(in)
+                                stats_zt,                    & ! intent(inout)
                                 thlm_mc, rvm_mc, hydromet )    ! Intent(inout)
 
   ! Description:
@@ -805,7 +606,7 @@ module fill_holes
   !-----------------------------------------------------------------------
 
     use grid_class, only: &
-        gr  ! Variable(s)
+        grid ! Type
 
     use clubb_precision, only: &
         core_rknd   ! Variable(s)
@@ -816,7 +617,8 @@ module fill_holes
         Lv,              &
         Ls,              &
         Cp,              &
-        fstderr
+        fstderr,         &
+        num_hf_draw_points
 
     use array_index, only: &
         hydromet_list, & ! Names of the hydrometeor species
@@ -835,13 +637,19 @@ module fill_holes
         stat_end_update
 
     use stats_variables, only: &
-        stats_zt, &  ! Variables
         l_stats_samp
 
     use error_code, only: &
         clubb_at_least_debug_level  ! Procedure
 
+    use stats_type, only: stats ! Type
+
     implicit none
+
+    type (stats), target, intent(inout) :: &
+      stats_zt
+
+    type (grid), target, intent(in) :: gr
 
     intrinsic :: trim
 
@@ -901,8 +709,8 @@ module fill_holes
                                     ixrm_cl, ixrm_mc,            & ! Intent(inout)
                                     max_velocity )                 ! Intent(inout)
 
-          call stat_begin_update( ixrm_hf, hydromet(:,i) &
-                                           / dt, stats_zt )
+          call stat_begin_update( gr%nz, ixrm_hf, hydromet(:,i) / dt, & ! intent(in)
+                                  stats_zt ) ! intent(inout)
 
        enddo ! i = 1, hydromet_dim
 
@@ -962,9 +770,10 @@ module fill_holes
          if ( hydromet_name(1:1) == "r" .and. l_hole_fill ) then
 
             ! Apply the hole filling algorithm
-            call fill_holes_vertical( 2, zero_threshold, "zt", &
-                                      rho_ds_zt, rho_ds_zm, &
-                                      hydromet(:,i) )
+            ! upper_hf_level = nz since we are filling the zt levels
+            call fill_holes_vertical( gr%nz, 1, num_hf_draw_points, zero_threshold, gr%nz, & ! In
+                                      gr%dzt, rho_ds_zt,                                   & ! In
+                                      hydromet(:,i) )                                      ! InOut
 
          endif ! Variable is a mixing ratio and l_hole_fill is true
 
@@ -973,15 +782,15 @@ module fill_holes
       ! Enter the new value of the hydrometeor for the effect of the
       ! hole-filling scheme.
       if ( l_stats_samp ) then
-         call stat_end_update( ixrm_hf, hydromet(:,i) &
-                                        / dt, stats_zt )
+         call stat_end_update( gr%nz, ixrm_hf, hydromet(:,i) / dt, & ! intent(in)
+                               stats_zt ) ! intent(inout)
       endif
 
       ! Store the previous value of the hydrometeor for the effect of the water
       ! vapor hole-filling scheme.
       if ( l_stats_samp ) then
-         call stat_begin_update( ixrm_wvhf, hydromet(:,i) &
-                                            / dt, stats_zt )
+         call stat_begin_update( gr%nz, ixrm_wvhf, hydromet(:,i) / dt, & ! intent(in)
+                                 stats_zt ) ! intent(inout)
       endif
 
       if ( any( hydromet(:,i) < zero_threshold ) ) then
@@ -1002,8 +811,8 @@ module fill_holes
       ! Enter the new value of the hydrometeor for the effect of the water vapor
       ! hole-filling scheme.
       if ( l_stats_samp ) then
-         call stat_end_update( ixrm_wvhf, hydromet(:,i) &
-                                          / dt, stats_zt )
+         call stat_end_update( gr%nz, ixrm_wvhf, hydromet(:,i) / dt, & ! intent(in)
+                               stats_zt ) ! intent(inout)
       endif
 
       ! Clipping for hydrometeor mixing ratios.
@@ -1012,10 +821,8 @@ module fill_holes
          ! Store the previous value of the hydrometeor for the effect of
          ! clipping.
          if ( l_stats_samp ) then
-            call stat_begin_update( ixrm_cl, &
-                                    hydromet(:,i) &
-                                    / dt, &
-                                    stats_zt )
+            call stat_begin_update( gr%nz, ixrm_cl, hydromet(:,i) / dt, & ! intent(in)
+                                    stats_zt ) ! intent(inout)
          endif
 
          if ( any( hydromet(:,i) < zero_threshold ) ) then
@@ -1065,8 +872,8 @@ module fill_holes
 
          ! Enter the new value of the hydrometeor for the effect of clipping.
          if ( l_stats_samp ) then
-            call stat_end_update( ixrm_cl, hydromet(:,i) &
-                                           / dt, stats_zt )
+            call stat_end_update( gr%nz, ixrm_cl, hydromet(:,i) / dt, & ! intent(in)
+                                  stats_zt ) ! intent(inout)
          endif
 
       endif ! l_mix_rat_hm(i)
@@ -1074,7 +881,7 @@ module fill_holes
     enddo ! i = 1, hydromet_dim, 1
 
     ! Calculate clipping for hydrometeor concentrations.
-    call clip_hydromet_conc_mvr( hydromet_dim, hydromet, & ! Intent(in)
+    call clip_hydromet_conc_mvr( gr%nz, hydromet_dim, hydromet, & ! Intent(in)
                                  hydromet_clipped )        ! Intent(out)
 
     ! Clip hydrometeor concentrations and output stats.
@@ -1092,7 +899,8 @@ module fill_holes
 
              ! Store the previous value of the hydrometeor for the effect of
              ! clipping.
-             call stat_begin_update( ixrm_cl, hydromet(:,i) / dt, stats_zt )
+             call stat_begin_update( gr%nz, ixrm_cl, hydromet(:,i) / dt, & ! intent(in)
+                                     stats_zt ) ! intent(inout)
 
           endif ! l_stats_samp
 
@@ -1101,7 +909,8 @@ module fill_holes
 
           ! Enter the new value of the hydrometeor for the effect of clipping.
           if ( l_stats_samp ) then
-             call stat_end_update( ixrm_cl, hydromet(:,i) / dt, stats_zt )
+             call stat_end_update( gr%nz, ixrm_cl, hydromet(:,i) / dt, & ! intent(in)
+                                   stats_zt ) ! intent(inout)
           endif
 
        endif ! .not. l_mix_rat_hm(i)
@@ -1114,7 +923,7 @@ module fill_holes
   end subroutine fill_holes_driver
 
   !=============================================================================
-  subroutine clip_hydromet_conc_mvr( hydromet_dim, hydromet, & ! Intent(in)
+  subroutine clip_hydromet_conc_mvr( nz, hydromet_dim, hydromet, & ! Intent(in)
                                      hydromet_clipped )        ! Intent(out)
 
     ! Description:
@@ -1127,7 +936,7 @@ module fill_holes
     !-----------------------------------------------------------------------
 
     use grid_class, only: &
-        gr    ! Variable(s)
+        grid ! Type
 
     use constants_clubb, only: &
         pi,          & ! Variable(s)
@@ -1152,13 +961,16 @@ module fill_holes
 
     ! Input Variables
     integer, intent(in) :: &
+      nz
+    
+    integer, intent(in) :: &
       hydromet_dim    ! Number of hydrometeor fields
 
-    real( kind = core_rknd ), dimension(gr%nz,hydromet_dim), intent(in) :: &
+    real( kind = core_rknd ), dimension(nz,hydromet_dim), intent(in) :: &
       hydromet    ! Mean of hydrometeor fields    [units vary]
 
     ! Output Variable
-    real( kind = core_rknd ), dimension(gr%nz,hydromet_dim), intent(out) :: &
+    real( kind = core_rknd ), dimension(nz,hydromet_dim), intent(out) :: &
       hydromet_clipped    ! Clipped mean of hydrometeor fields    [units vary]
 
     ! Local Variables
@@ -1224,7 +1036,7 @@ module fill_holes
 
           ! Loop over vertical levels and increase hydrometeor concentrations
           ! when necessary.
-          do k = 2, gr%nz, 1
+          do k = 2, nz, 1
 
              if ( hydromet(k,Nx2rx_hm_idx(idx)) > zero ) then
 
@@ -1239,7 +1051,7 @@ module fill_holes
 
              endif ! hydromet(k,Nx2rx_hm_idx(idx)) > 0
 
-          enddo ! k = 2, gr%nz, 1
+          enddo ! k = 2, nz, 1
 
           ! The lowest thermodynamic level is below the model's lower boundary.
           hydromet_clipped(1,idx) = hydromet(1,idx)

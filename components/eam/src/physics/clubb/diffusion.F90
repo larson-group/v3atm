@@ -25,18 +25,15 @@ module diffusion
   private ! Default Scope
 
   public :: diffusion_zt_lhs, &
-            diffusion_zt_lhs_all, &
             diffusion_cloud_frac_zt_lhs, & 
-            diffusion_zm_lhs, &
-            diffusion_zm_lhs_all
+            diffusion_zm_lhs
 
   contains
 
   !=============================================================================
-  pure function diffusion_zt_lhs( K_zm, K_zmm1, nu,  &
-                                  invrs_dzmm1, invrs_dzm,  &
-                                  invrs_dzt, level )  &
-  result( lhs )
+  pure subroutine diffusion_zt_lhs( nz, ngrdcol, gr, K_zm, K_zt, nu,  & ! In
+                                    invrs_rho_ds_zt, rho_ds_zm,       & ! In
+                                    lhs )                               ! Out
 
     ! Description:
     ! Vertical eddy diffusion of var_zt:  implicit portion of the code.
@@ -79,15 +76,15 @@ module diffusion
     ! Then, the derivative of the whole mathematical expression is taken over
     ! the central thermodynamic level, which yields the desired result.
     !
-    ! --var_ztp1----------------------------------------------- t(k+1)
+    ! --var_zt------------------------------------------------- t(k+1)
     !
     ! ==========d(var_zt)/dz==(K_zm+nu)======================== m(k)
     !
     ! --var_zt-------------------d[(K_zm+nu)*d(var_zt)/dz]/dz-- t(k)
     !
-    ! ==========d(var_zt)/dz==(K_zmm1+nu)====================== m(k-1)
+    ! ==========d(var_zt)/dz==(K_zm+nu)======================== m(k-1)
     !
-    ! --var_ztm1----------------------------------------------- t(k-1)
+    ! --var_zt------------------------------------------------- t(k-1)
     !
     ! The vertical indices t(k+1), m(k), t(k), m(k-1), and t(k-1) correspond
     ! with altitudes zt(k+1), zm(k), zt(k), zm(k-1), and zt(k-1), respectively.
@@ -252,154 +249,217 @@ module diffusion
     !-----------------------------------------------------------------------
 
     use grid_class, only: & 
-        gr ! Variable(s)
+        grid, &  ! Type
+        ddzm     ! Procedure
+
+    use constants_clubb, only: &
+        zero    ! Constant(s)
 
     use clubb_precision, only: &
         core_rknd ! Variable(s)
+
+    use model_flags, only: &
+        l_upwind_Kh_dp_term
 
     implicit none
 
     ! Constant parameters
     integer, parameter :: & 
-      kp1_tdiag = 1,    & ! Thermodynamic superdiagonal index.
-      k_tdiag   = 2,    & ! Thermodynamic main diagonal index.
-      km1_tdiag = 3       ! Thermodynamic subdiagonal index.
+      kp1_tdiag = 1, & ! Thermodynamic superdiagonal index.
+      k_tdiag   = 2, & ! Thermodynamic main diagonal index.
+      km1_tdiag = 3    ! Thermodynamic subdiagonal index.
 
     ! Input Variables
-    real( kind = core_rknd ), intent(in) ::  & 
-      K_zm,        & ! Coef. of eddy diffusivity at momentum level (k)   [m^2/s]
-      K_zmm1,      & ! Coef. of eddy diffusivity at momentum level (k-1) [m^2/s 
-      invrs_dzt,   & ! Inverse of grid spacing over thermo. level (k)    [1/m]
-      invrs_dzm,   & ! Inverse of grid spacing over momentum level (k)   [1/m]
-      invrs_dzmm1    ! Inverse of grid spacing over momentum level (k-1) [1/m]
+    integer, intent(in) :: &
+      nz, &
+      ngrdcol
 
-    real( kind = core_rknd ), dimension(gr%nz), intent(in) :: &
-      nu             ! Background constant coef. of eddy diffusivity     [m^2/s]
+    type (grid), target, intent(in) :: gr
+    
+    real( kind = core_rknd ), dimension(ngrdcol,nz), intent(in) ::  & 
+      K_zm,            & ! Coef. of eddy diffusivity at momentum levels   [m^2/s]
+      K_zt,            & ! Coef. of eddy diffusivity at thermo. levels    [m^2/s]
+      rho_ds_zm,       & ! Dry statis density on momentum levels          [kg]
+      invrs_rho_ds_zt    ! Inverse dry statis density on thermo. levels   [1/kg]
 
-    integer, intent(in) ::  & 
-      level     ! Thermodynamic level where calculation occurs.          [-]
+    real( kind = core_rknd ), dimension(ngrdcol), intent(in) ::  & 
+      nu                ! Background constant coef. of eddy diffusivity  [m^2/s]
 
     ! Return Variable
-    real( kind = core_rknd ), dimension(3) :: lhs
+    real( kind = core_rknd ), dimension(3,ngrdcol,nz), intent(out) :: &
+      lhs     ! LHS coefficient of diffusion term    [1/s]
 
-    if ( level == 1 ) then
+    ! Local Variable
+    integer :: i,k    ! Vertical level index
 
-      ! k = 1 (bottom level); lower boundary level.
-      ! Only relevant if zero-flux boundary conditions are used.
+    real( kind = core_rknd ), dimension(3,ngrdcol,nz) :: &
+      lhs_upwind    ! LHS coefficient diffusion term due to upwind  [1/s]
 
-      ! Thermodynamic superdiagonal: [ x var_zt(k+1,<t+1>) ]
-      lhs(kp1_tdiag) = - invrs_dzt * (K_zm+nu(1)) * invrs_dzm
+    real( kind = core_rknd ), dimension(ngrdcol,nz) :: & 
+      drhoKdz_zt, &
+      K_zm_nu
 
-      ! Thermodynamic main diagonal: [ x var_zt(k,<t+1>) ]
-      lhs(k_tdiag)   = + invrs_dzt * (K_zm+nu(1)) * invrs_dzm
+    ! ------------------- Begin code ------------------------
+    
+    do k = 1, nz
+      do i = 1, ngrdcol
+        K_zm_nu(i,k) = K_zm(i,k) + nu(i)
+      end do
+    end do
 
-      ! Thermodynamic subdiagonal: [ x var_zt(k-1,<t+1>) ]
-      lhs(km1_tdiag) = 0.0_core_rknd
+    ! calculate the dKh_zt/dz 
+    drhoKdz_zt = - invrs_rho_ds_zt * ddzm( nz, ngrdcol, gr, rho_ds_zm * K_zm_nu )
 
+    ! extra terms with upwind scheme 
+    ! k = 1 (bottom level); lowere boundary level 
+    do i = 1, ngrdcol
+      lhs_upwind(kp1_tdiag,i,1) = + min( drhoKdz_zt(i,1) , zero ) * gr%invrs_dzm(i,1)  
+      lhs_upwind(k_tdiag,i,1)   = - min( drhoKdz_zt(i,1) , zero ) * gr%invrs_dzm(i,1)
+      lhs_upwind(km1_tdiag,i,1) = zero
+    end do
 
-    elseif ( level > 1 .and. level < gr%nz ) then
+    ! Most of the interior model; normal conditions.
+    do k = 2, nz-1, 1
+      do i = 1, ngrdcol
+        ! Thermodynamic superdiagonal: [ x var_zt(k+1,<t+1>) ]
+         lhs_upwind(kp1_tdiag,i,k) = + min( drhoKdz_zt(i,k) , zero ) * gr%invrs_dzm(i,k) 
+        ! Thermodynamic main diagonal: [ x var_zt(k,<t+1>) ]
+        lhs_upwind(k_tdiag,i,k)   = - min( drhoKdz_zt(i,k) , zero ) * gr%invrs_dzm(i,k) &
+                                    + max( drhoKdz_zt(i,k) , zero ) * gr%invrs_dzm(i,k-1)
+        ! Thermodynamic subdiagonal: [ x var_zt(k-1,<t+1>) ]
+        lhs_upwind(km1_tdiag,i,k) = - max( drhoKdz_zt(i,k) , zero ) * gr%invrs_dzm(i,k-1)
+      end do
+    end do 
 
-      ! Most of the interior model; normal conditions.
+    ! k = nz (top level); upper boundary level.
+    ! Only relevant if zero-flux boundary conditions are used.
+    do i = 1, ngrdcol
+      lhs_upwind(kp1_tdiag,i,nz) =  zero 
+      lhs_upwind(k_tdiag,i,nz)   = + max( drhoKdz_zt(i,nz) , zero ) * gr%invrs_dzm(i,nz-1)
+      lhs_upwind(km1_tdiag,i,nz) = - max( drhoKdz_zt(i,nz) , zero ) * gr%invrs_dzm(i,nz-1)
+    end do
 
-      ! Thermodynamic superdiagonal: [ x var_zt(k+1,<t+1>) ]
-      lhs(kp1_tdiag) = - invrs_dzt * (K_zm+nu(level)) * invrs_dzm
+    ! k = 1 (bottom level); lower boundary level.
+    ! Only relevant if zero-flux boundary conditions are used.
+    ! These k=1 lines currently do not have any effect on model results.  
+    ! These k=1 level of this "lhs" array is not fed into
+    ! the final LHS matrix that will be used to solve for the next timestep.
 
-      ! Thermodynamic main diagonal: [ x var_zt(k,<t+1>) ]
-      lhs(k_tdiag)   = + invrs_dzt * (  (K_zm+nu(level))*invrs_dzm  &
-                                      + (K_zmm1+nu(level))*invrs_dzmm1 )
+    if ( .not. l_upwind_Kh_dp_term ) then
+      do i = 1, ngrdcol
+        ! Thermodynamic superdiagonal: [ x var_zt(k+1,<t+1>) ]
+        lhs(kp1_tdiag,i,1) = - gr%invrs_dzt(i,1) * invrs_rho_ds_zt(i,1) &
+                                          * ( K_zm(i,1) + nu(i) ) * rho_ds_zm(i,1) * gr%invrs_dzm(i,1)
 
-      ! Thermodynamic subdiagonal: [ x var_zt(k-1,<t+1>) ]
-      lhs(km1_tdiag) = - invrs_dzt * (K_zmm1+nu(level)) * invrs_dzmm1
+        ! Thermodynamic main diagonal: [ x var_zt(k,<t+1>) ]
+        lhs(k_tdiag,i,1)   = + gr%invrs_dzt(i,1) * invrs_rho_ds_zt(i,1) &
+                                          * ( K_zm(i,1) + nu(i) ) * rho_ds_zm(i,1) * gr%invrs_dzm(i,1)
 
-    elseif ( level == gr%nz ) then
+        ! Thermodynamic subdiagonal: [ x var_zt(k-1,<t+1>) ]
+        lhs(km1_tdiag,i,1) = zero
+      end do
+    else
+      do i = 1, ngrdcol
+        ! Thermodynamic superdiagonal: [ x var_zt(k+1,<t+1>) ]
+        lhs(kp1_tdiag,i,1) = - gr%invrs_dzt(i,1) * ( K_zt(i,1) + nu(i) ) * gr%invrs_dzm(i,1) & 
+                           + lhs_upwind(kp1_tdiag,i,1)
 
-      ! k = gr%nz (top level); upper boundary level.
-      ! Only relevant if zero-flux boundary conditions are used.
+        ! Thermodynamic main diagonal: [ x var_zt(k,<t+1>) ]
+        lhs(k_tdiag,i,1)   = + gr%invrs_dzt(i,1) * ( K_zt(i,1) + nu(i) ) * gr%invrs_dzm(i,1) & 
+                           + lhs_upwind(k_tdiag,i,1)
 
-      ! Thermodynamic superdiagonal: [ x var_zt(k+1,<t+1>) ]
-      lhs(kp1_tdiag) = 0.0_core_rknd
+        ! Thermodynamic subdiagonal: [ x var_zt(k-1,<t+1>) ]
+        lhs(km1_tdiag,i,1) = zero & 
+                           + lhs_upwind(km1_tdiag,i,1) 
+      end do
+    end if 
 
-      ! Thermodynamic main diagonal: [ x var_zt(k,<t+1>) ]
-      lhs(k_tdiag)   = + invrs_dzt * (K_zmm1+nu(gr%nz)) * invrs_dzmm1
-
-      ! Thermodynamic subdiagonal: [ x var_zt(k-1,<t+1>) ]
-      lhs(km1_tdiag) = - invrs_dzt * (K_zmm1+nu(gr%nz)) * invrs_dzmm1
-
-
-    endif
-
-  end function diffusion_zt_lhs
-
-    !====================================================================================
-    pure subroutine diffusion_zt_lhs_all( K_zm, nu,             & ! Intent(in)
-                                          invrs_dzm, invrs_dzt, & ! Intent(in)
-                                          lhs                   ) ! Intent(out)
-    ! Description:
-    !   This subroutine is an optimized version of diffusion_zt_lhs. diffusion_zt_lhs
-    !   returns a length 3 array for any specified grid level. This subroutine returns
-    !   an array of length 3 arrays, one for every specified grid level.
-    ! 
-    ! Notes:
-    !   This subroutine exists for performance concerns. It returns many lhs arrays at
-    !   once so that it can be properly vectorized, see clubb:ticket:834 for detail.
-    ! 
-    !------------------------------------------------------------------------------------    
-
-        use grid_class, only: & 
-            gr ! Variable(s)
-
-        use clubb_precision, only: &
-            core_rknd ! Variable(s)
-
-        implicit none
-
-        !------------------- Input Variables -------------------
-        real( kind = core_rknd ), dimension(gr%nz), intent(in) :: &
-          K_zm,         & ! Coef. of eddy diffusivity at momentum level (k)   [m^2/s]
-          invrs_dzt,    & ! Inverse of grid spacing over thermo. level (k)    [1/m]
-          invrs_dzm,    & ! Inverse of grid spacing over momentum level (k)   [1/m]
-          nu              ! Background constant coef. of eddy diffusivity     [m^2/s]
-
-        !------------------- Output Variables -------------------
-        real( kind = core_rknd ), dimension(3,gr%nz), intent(out) :: &
-            lhs           ! Eddy diffusion elements of the left hand side matrix
-
-        !---------------- Local Variables -------------------
-        integer :: &
-            k             ! Loop variable for current grid level
-
-        !---------------- Begin Code -------------------
-
-        ! Handle lower boundary level
-        lhs(1,1) = - invrs_dzt(1) * ( K_zm(1) + nu(1) ) * invrs_dzm(1)
-        lhs(2,1) = + invrs_dzt(1) * ( K_zm(1) + nu(1) ) * invrs_dzm(1)
-        lhs(3,1) = 0.0_core_rknd
-
-        ! Handle every other level
-        do k = 2, gr%nz-1
+    ! Most of the interior model; normal conditions.
+    do k = 2, nz-1, 1
+      do i = 1, ngrdcol
+        if ( .not. l_upwind_Kh_dp_term ) then
 
           ! Thermodynamic superdiagonal: [ x var_zt(k+1,<t+1>) ]
-          lhs(1,k) = - invrs_dzt(k) * ( K_zm(k) + nu(k) ) * invrs_dzm(k)
+          lhs(kp1_tdiag,i,k) &
+          = - gr%invrs_dzt(i,k) * invrs_rho_ds_zt(i,k) & 
+                           * K_zm_nu(i,k) * rho_ds_zm(i,k) * gr%invrs_dzm(i,k)
 
           ! Thermodynamic main diagonal: [ x var_zt(k,<t+1>) ]
-          lhs(2,k) = + invrs_dzt(k) * ( ( K_zm(k) + nu(k) ) * invrs_dzm(k)   &
-                                    + ( K_zm(k-1) + nu(k) ) * invrs_dzm(k-1) )
+          lhs(k_tdiag,i,k) &
+          = + gr%invrs_dzt(i,k) * invrs_rho_ds_zt(i,k) & 
+                           * ( K_zm_nu(i,k) * rho_ds_zm(i,k) * gr%invrs_dzm(i,k) &
+                               + K_zm_nu(i,k-1) * rho_ds_zm(i,k-1) * gr%invrs_dzm(i,k-1) )
 
           ! Thermodynamic subdiagonal: [ x var_zt(k-1,<t+1>) ]
-          lhs(3,k) = - invrs_dzt(k) * ( K_zm(k-1) + nu(k) ) * invrs_dzm(k-1)
+          lhs(km1_tdiag,i,k) &
+          = - gr%invrs_dzt(i,k) * invrs_rho_ds_zt(i,k) & 
+                           * K_zm_nu(i,k-1) * rho_ds_zm(i,k-1) * gr%invrs_dzm(i,k-1)
+                           
+        else
 
-        end do
+          ! Thermodynamic superdiagonal: [ x var_zt(k+1,<t+1>) ]
+          lhs(kp1_tdiag,i,k) &
+          = - gr%invrs_dzt(i,k) * ( K_zt(i,k) + nu(i) ) * gr%invrs_dzm(i,k) &
+            + lhs_upwind(kp1_tdiag,i,k)
 
-        ! Handle upper boundary level
-        lhs(1,gr%nz) = 0.0_core_rknd
-        lhs(2,gr%nz) = + invrs_dzt(gr%nz) * ( K_zm(gr%nz-1) + nu(gr%nz) ) * invrs_dzm(gr%nz-1)
-        lhs(3,gr%nz) = - invrs_dzt(gr%nz) * ( K_zm(gr%nz-1) + nu(gr%nz) ) * invrs_dzm(gr%nz-1)
+          ! Thermodynamic main diagonal: [ x var_zt(k,<t+1>) ]
+          lhs(k_tdiag,i,k) &
+          = + gr%invrs_dzt(i,k) * ( K_zt(i,k) + nu(i) ) * ( gr%invrs_dzm(i,k) + gr%invrs_dzm(i,k-1) ) & 
+            + lhs_upwind(k_tdiag,i,k)  
 
-    end subroutine diffusion_zt_lhs_all
+          ! Thermodynamic subdiagonal: [ x var_zt(k-1,<t+1>) ]
+          lhs(km1_tdiag,i,k) &
+          = - gr%invrs_dzt(i,k) * ( K_zt(i,k) + nu(i) ) * gr%invrs_dzm(i,k-1) & 
+            + lhs_upwind(km1_tdiag,i,k) 
+
+        end if 
+        
+      end do
+    end do ! k = 2, nz-1, 1
+
+    ! k = nz (top level); upper boundary level.
+    ! Only relevant if zero-flux boundary conditions are used.
+
+    if ( .not. l_upwind_Kh_dp_term ) then 
+      do i = 1, ngrdcol
+        ! Thermodynamic superdiagonal: [ x var_zt(k+1,<t+1>) ]
+        lhs(kp1_tdiag,i,nz) = zero
+
+        ! Thermodynamic main diagonal: [ x var_zt(k,<t+1>) ]
+        lhs(k_tdiag,i,nz) &
+        = + gr%invrs_dzt(i,nz) * invrs_rho_ds_zt(i,nz) &
+            * ( K_zm(i,nz-1) + nu(i) ) * rho_ds_zm(i,nz-1) * gr%invrs_dzm(i,nz-1) 
+
+        ! Thermodynamic subdiagonal: [ x var_zt(k-1,<t+1>) ]
+        lhs(km1_tdiag,i,nz) &
+        = - gr%invrs_dzt(i,nz) * invrs_rho_ds_zt(i,nz) &
+            * ( K_zm(i,nz-1) + nu(i) ) * rho_ds_zm(i,nz-1) * gr%invrs_dzm(i,nz-1)
+      end do
+    else
+      do i = 1, ngrdcol
+        ! Thermodynamic superdiagonal: [ x var_zt(k+1,<t+1>) ]
+        lhs(kp1_tdiag,i,nz) = zero &
+                              + lhs_upwind(kp1_tdiag,i,nz)
+
+        ! Thermodynamic main diagonal: [ x var_zt(k,<t+1>) ]
+        lhs(k_tdiag,i,nz) &
+        = + gr%invrs_dzt(i,nz) * ( K_zt(i,nz) + nu(i) ) * gr%invrs_dzm(i,nz-1) &
+          + lhs_upwind(k_tdiag,i,nz) 
+
+        ! Thermodynamic subdiagonal: [ x var_zt(k-1,<t+1>) ]
+        lhs(km1_tdiag,i,nz) &
+        = - gr%invrs_dzt(i,nz) * ( K_zt(i,nz) + nu(i) ) * gr%invrs_dzm(i,nz-1) &
+          + lhs_upwind(km1_tdiag,i,nz)
+      end do
+    end if 
+
+    return
+
+  end subroutine diffusion_zt_lhs
 
   !=============================================================================
   pure function diffusion_cloud_frac_zt_lhs &
-                ( K_zm, K_zmm1, cloud_frac_zt, cloud_frac_ztm1, &
+                ( gr, K_zm, K_zmm1, cloud_frac_zt, cloud_frac_ztm1, &
                   cloud_frac_ztp1, cloud_frac_zm, &
                   cloud_frac_zmm1, &
                   nu, invrs_dzmm1, invrs_dzm, invrs_dzt, level ) &
@@ -414,19 +474,21 @@ module diffusion
   !   This algorithm uses equations derived from Guo, et al. 2009.
   !-----------------------------------------------------------------------------
 
-   use grid_class, only: & 
-     gr ! Variable(s)
+     use grid_class, only: & 
+        grid ! Type
 
-   use clubb_precision, only: &
-     core_rknd ! Variable(s)
+     use clubb_precision, only: &
+         core_rknd ! Variable(s)
 
-    implicit none
+      implicit none
+ 
+    type (grid), target, intent(in) :: gr
 
     ! External
-    intrinsic :: min
+      intrinsic :: min
 
     ! Constant parameters
-    real( kind = core_rknd ), parameter :: &
+      real( kind = core_rknd ), parameter :: &
       cf_ratio = 10._core_rknd ! Maximum cloud-fraction coefficient applied to Kh_zm
 
     integer, parameter :: & 
@@ -447,7 +509,7 @@ module diffusion
       invrs_dzm,       & ! Inverse of grid spacing over mom. level (k)   [1/m]
       invrs_dzmm1        ! Inverse of grid spacing over mom. level (k-1) [1/m]
 
-    real( kind = core_rknd ), dimension(gr%nz), intent(in) :: &
+    real( kind = core_rknd ), intent(in) :: &
       nu                 ! Background constant coef. of eddy diffusivity [m^2/s]
 
     integer, intent(in) ::  & 
@@ -470,7 +532,7 @@ module diffusion
       lhs(kp1_tdiag) = - invrs_dzt &
                          * (K_zm &
                             * min( cloud_frac_zm / cloud_frac_ztp1, cf_ratio ) &
-                            + nu(1)) * invrs_dzm
+                            + nu) * invrs_dzm
 
       ! Thermodynamic main diagonal: [ x var_zt(k,<t+1>) ]
 !     lhs(k_tdiag)   = + invrs_dzt &
@@ -479,7 +541,7 @@ module diffusion
       lhs(k_tdiag)   = + invrs_dzt &
                          * (K_zm &
                             * min( cloud_frac_zm / cloud_frac_ztp1, cf_ratio ) &
-                            + nu(1)) * invrs_dzm
+                            + nu) * invrs_dzm
 
       ! Thermodynamic subdiagonal: [ x var_zt(k-1,<t+1>) ]
       lhs(km1_tdiag) = 0.0_core_rknd
@@ -500,7 +562,7 @@ module diffusion
       lhs(kp1_tdiag) = - invrs_dzt &
                          * (K_zm &
                             * min( cloud_frac_zm / cloud_frac_ztp1, cf_ratio ) &
-                            + nu(level) ) * invrs_dzm
+                            + nu ) * invrs_dzm
 
       ! Thermodynamic main diagonal: [ x var_zt(k,<t+1>) ]
 !     lhs(k_tdiag)   = + invrs_dzt &
@@ -515,7 +577,7 @@ module diffusion
 !                               ) &
 !                          )
       lhs(k_tdiag)   = + invrs_dzt &
-                          * ( nu(level)*(invrs_dzm+invrs_dzmm1) + &
+                          * ( nu*(invrs_dzm+invrs_dzmm1) + &
                               (   K_zm*invrs_dzm* &
                                      min( cloud_frac_zm / cloud_frac_zt, &
                                           cf_ratio ) &
@@ -532,7 +594,7 @@ module diffusion
                           * (K_zmm1 &
                              * min( cloud_frac_zmm1 / cloud_frac_ztm1, &
                                     cf_ratio ) &
-                             + nu(level) ) * invrs_dzmm1
+                             + nu ) * invrs_dzmm1
 
     else if ( level == gr%nz ) then
 
@@ -550,7 +612,7 @@ module diffusion
                           * (K_zmm1 &
                              * min( cloud_frac_zmm1 / cloud_frac_ztm1, &
                                     cf_ratio ) &
-                             + nu(gr%nz)) * invrs_dzmm1
+                             + nu) * invrs_dzmm1
 
       ! Thermodynamic subdiagonal: [ x var_zt(k-1,<t+1>) ]
 !     lhs(km1_tdiag) = - invrs_dzt * (K_zmm1+nu) * &
@@ -559,7 +621,7 @@ module diffusion
                           * (K_zmm1 &
                              * min( cloud_frac_zmm1 / cloud_frac_ztm1, &
                                     cf_ratio ) &
-                             + nu(gr%nz)) * invrs_dzmm1
+                             + nu) * invrs_dzmm1
 
     end if
 
@@ -567,10 +629,9 @@ module diffusion
   end function diffusion_cloud_frac_zt_lhs
 
   !=============================================================================
-  pure function diffusion_zm_lhs( K_zt, K_ztp1, nu,  & 
-                                  invrs_dztp1, invrs_dzt,  &
-                                  invrs_dzm, level )  &
-  result( lhs )
+  pure subroutine diffusion_zm_lhs( nz, ngrdcol, gr, K_zt, K_zm, nu,   & ! In
+                                    invrs_rho_ds_zm, rho_ds_zt, & ! In 
+                                    lhs )                   ! Out
 
     ! Description:
     ! Vertical eddy diffusion of var_zm:  implicit portion of the code.
@@ -613,15 +674,15 @@ module diffusion
     ! ( K_zt + nu ).  Then, the derivative of the whole mathematical expression
     ! is taken over the central momentum level, which yields the desired result.
     !
-    ! ==var_zmp1=============================================== m(k+1)
+    ! ==var_zm================================================= m(k+1)
     !
-    ! ----------d(var_zm)/dz--(K_ztp1+nu)---------------------- t(k+1)
+    ! ----------d(var_zm)/dz--(K_zt+nu)------------------------ t(k+1)
     !
     ! ==var_zm===================d[(K_zt+nu)*d(var_zm)/dz]/dz== m(k)
     !
     ! ----------d(var_zm)/dz--(K_zt+nu)------------------------ t(k)
     !
-    ! ==var_zmm1=============================================== m(k-1)
+    ! ==var_zm================================================= m(k-1)
     !
     ! The vertical indices m(k+1), t(k+1), m(k), t(k), and m(k-1) correspond
     ! with altitudes zm(k+1), zt(k+1), zm(k), zt(k), and zm(k-1), respectively.
@@ -786,149 +847,212 @@ module diffusion
     !-----------------------------------------------------------------------
 
     use grid_class, only: & 
-        gr       ! Variable(s)
+        grid, & ! Type
+        ddzt    ! Procedure
+
+    use constants_clubb, only: &
+        zero    ! Constant(s)
 
     use clubb_precision, only: &
         core_rknd ! Variable(s)
+
+    use model_flags, only: &
+        l_upwind_Kh_dp_term
 
     implicit none
 
     ! Constant parameters
     integer, parameter :: & 
-      kp1_mdiag = 1,    & ! Momentum superdiagonal index.
-      k_mdiag   = 2,    & ! Momentum main diagonal index.
-      km1_mdiag = 3       ! Momentum subdiagonal index.
+      kp1_mdiag = 1, & ! Momentum superdiagonal index.
+      k_mdiag   = 2, & ! Momentum main diagonal index.
+      km1_mdiag = 3    ! Momentum subdiagonal index.
 
     ! Input Variables
-    real( kind = core_rknd ), intent(in) ::  & 
-      K_zt,        & ! Coef. of eddy diffusivity at thermo. level (k)   [m^2/s]
-      K_ztp1,      & ! Coef. of eddy diffusivity at thermo. level (k+1) [m^2/s]
-      invrs_dzm,   & ! Inverse of grid spacing over momentum level (k)  [1/m]
-      invrs_dzt,   & ! Inverse of grid spacing over thermo. level (k)   [1/m]
-      invrs_dztp1    ! Inverse of grid spacing over thermo. level (k+1) [1/m]
+    integer, intent(in) :: &
+      nz, &
+      ngrdcol
 
-    real( kind = core_rknd ), dimension(gr%nz), intent(in) :: &
-      nu             ! Background constant coef. of eddy diffusivity    [m^2/s]
+    type (grid), target, intent(in) :: gr
+    
+    real( kind = core_rknd ), dimension(ngrdcol,nz), intent(in) ::  &
+      K_zm,           &  
+      K_zt,           & ! Coef. of eddy diffusivity at thermo. levels   [m^2/s]
+      rho_ds_zt,      &
+      invrs_rho_ds_zm
 
-    integer, intent(in) ::  & 
-      level     ! Momentum level where calculation occurs.              [-]
+    real( kind = core_rknd ), dimension(ngrdcol), intent(in) ::  &
+      nu                ! Background constant coef. of eddy diffusivity [m^2/s]
 
     ! Return Variable
-    real( kind = core_rknd ), dimension(3) :: lhs
+    real( kind = core_rknd ), dimension(3,ngrdcol,nz), intent(out) :: &
+      lhs     ! LHS coefficient of diffusion term    [1/s]
 
-    if ( level == 1 ) then
+    ! Local Variable
+    integer :: i, k    ! Vertical level index
 
-      ! k = 1; lower boundary level at surface.
-      ! Only relevant if zero-flux boundary conditions are used.
+    real( kind = core_rknd ), dimension(3,ngrdcol,nz) :: &
+      lhs_upwind    ! LHS coefficient diffusion term due to upwind  [1/s]
 
-      ! Momentum superdiagonal: [ x var_zm(k+1,<t+1>) ]
-      lhs(kp1_mdiag) = - invrs_dzm * (K_ztp1+nu(2)) * invrs_dztp1
+    real( kind = core_rknd ), dimension(ngrdcol,nz) :: &
+      drhoKdz_zm, &
+      K_zt_nu
+      
+    !------------Begin code------------------------------
+    
+    do k = 1, nz
+      do i = 1, ngrdcol
+        K_zt_nu(i,k) = K_zt(i,k) + nu(i)
+      end do
+    end do
 
-      ! Momentum main diagonal: [ x var_zm(k,<t+1>) ]
-      lhs(k_mdiag)   = + invrs_dzm * (K_ztp1+nu(2)) * invrs_dztp1
+    ! calculate the dKh_zm/dz 
+    drhoKdz_zm = - invrs_rho_ds_zm * ddzt( nz, ngrdcol, gr, rho_ds_zt * K_zt_nu )
 
-      ! Momentum subdiagonal: [ x var_zm(k-1,<t+1>) ]
-      lhs(km1_mdiag) = 0.0_core_rknd
+    ! extra terms with upwind scheme 
+    ! k = 1 (bottom level); lowere boundary level 
+    do i = 1, ngrdcol
+      lhs_upwind(kp1_mdiag,i,1) = + min( drhoKdz_zm(i,1) , zero ) * gr%invrs_dzt(i,2)
+      lhs_upwind(k_mdiag,i,1)   = - min( drhoKdz_zm(i,1) , zero ) * gr%invrs_dzt(i,2)
+      lhs_upwind(km1_mdiag,i,1) = zero
+    end do
+
+    ! Most of the interior model; normal conditions.
+    do k = 2, nz-1, 1
+      do i = 1, ngrdcol
+        ! Momentum superdiagonal: [ x var_zm(k+1,<t+1>) ]
+        lhs_upwind(kp1_mdiag,i,k) = + min( drhoKdz_zm(i,k) , zero ) * gr%invrs_dzt(i,k+1)
+        ! Momentum main diagonal: [ x var_zm(k,<t+1>) ]
+        lhs_upwind(k_mdiag,i,k)   = - min( drhoKdz_zm(i,k) , zero ) * gr%invrs_dzt(i,k+1) &
+                                    + max( drhoKdz_zm(i,k) , zero ) * gr%invrs_dzt(i,k)
+        ! Momentum subdiagonal: [ x var_zm(k-1,<t+1>) ]
+        lhs_upwind(km1_mdiag,i,k) = - max( drhoKdz_zm(i,k) , zero ) * gr%invrs_dzt(i,k)
+      end do
+    end do
+
+    ! k = nz (top level); upper boundary level.
+    ! Only relevant if zero-flux boundary conditions are used.
+    do i = 1, ngrdcol
+      lhs_upwind(kp1_mdiag,i,nz) = zero
+      lhs_upwind(k_mdiag,i,nz)   = + max( drhoKdz_zm(i,nz) , zero ) * gr%invrs_dzt(i,nz)
+      lhs_upwind(km1_mdiag,i,nz) = - max( drhoKdz_zm(i,nz) , zero ) * gr%invrs_dzt(i,nz)
+    end do
+
+    ! k = 1; lower boundary level at surface.
+    ! Only relevant if zero-flux boundary conditions are used.
+    ! These k=1 lines currently do not have any effect on model results.  
+    ! These k=1 level of this "lhs" array is not fed into
+    ! the final LHS matrix that will be used to solve for the next timestep.
+
+    if ( .not. l_upwind_Kh_dp_term ) then
+      do i = 1, ngrdcol
+        ! Momentum superdiagonal: [ x var_zm(k+1,<t+1>) ]
+        lhs(kp1_mdiag,i,1) = - gr%invrs_dzm(i,1) * invrs_rho_ds_zm(i,1) &
+                                * ( K_zt(i,2) + nu(i) ) * rho_ds_zt(i,2) * gr%invrs_dzt(i,2)
+
+        ! Momentum main diagonal: [ x var_zm(k,<t+1>) ]
+        lhs(k_mdiag,i,1)   = + gr%invrs_dzm(i,1) * invrs_rho_ds_zm(i,1) &
+                                  * ( K_zt(i,2) + nu(i) ) * rho_ds_zt(i,2) * gr%invrs_dzt(i,2)
+
+        ! Momentum subdiagonal: [ x var_zm(k-1,<t+1>) ]
+        lhs(km1_mdiag,i,1) = zero
+      end do
+    else
+      do i = 1, ngrdcol
+        ! Momentum superdiagonal: [ x var_zm(k+1,<t+1>) ]
+        lhs(kp1_mdiag,i,1) = - gr%invrs_dzm(i,1) * ( K_zm(i,1) + nu(i) ) * gr%invrs_dzt(i,2) &
+                           + lhs_upwind(kp1_mdiag,i,1)
+
+        ! Momentum main diagonal: [ x var_zm(k,<t+1>) ]
+        lhs(k_mdiag,i,1)   = + gr%invrs_dzm(i,1) * ( K_zm(i,1) + nu(i) ) * gr%invrs_dzt(i,2) &
+                           + lhs_upwind(k_mdiag,i,1)
+
+        ! Momentum subdiagonal: [ x var_zm(k-1,<t+1>) ]
+        lhs(km1_mdiag,i,1) =   zero + lhs_upwind(km1_mdiag,i,1)
+      end do
+    end if
+
+    ! Most of the interior model; normal conditions.
+    do k = 2, nz-1, 1
+      do i = 1, ngrdcol
+        if ( .not. l_upwind_Kh_dp_term ) then
+
+          ! Momentum superdiagonal: [ x var_zm(k+1,<t+1>) ]
+          lhs(kp1_mdiag,i,k) &
+          = - gr%invrs_dzm(i,k) * invrs_rho_ds_zm(i,k) &
+                           * ( K_zt(i,k+1) + nu(i) ) * rho_ds_zt(i,k+1) * gr%invrs_dzt(i,k+1)
+
+          ! Momentum main diagonal: [ x var_zm(k,<t+1>) ]
+          lhs(k_mdiag,i,k) &
+          = + gr%invrs_dzm(i,k) * invrs_rho_ds_zm(i,k) &
+                           * ( ( K_zt(i,k+1) + nu(i) ) * rho_ds_zt(i,k+1) * gr%invrs_dzt(i,k+1)  &
+                               + ( K_zt(i,k) + nu(i) ) * rho_ds_zt(i,k) * gr%invrs_dzt(i,k) )
+
+          ! Momentum subdiagonal: [ x var_zm(k-1,<t+1>) ]
+          lhs(km1_mdiag,i,k) &
+          = - gr%invrs_dzm(i,k) * invrs_rho_ds_zm(i,k) &
+                           * ( K_zt(i,k) + nu(i) ) * rho_ds_zt(i,k) * gr%invrs_dzt(i,k)
+        else
+
+          ! Momentum superdiagonal: [ x var_zm(k+1,<t+1>) ]
+          lhs(kp1_mdiag,i,k) &
+          = - gr%invrs_dzm(i,k) * ( K_zm(i,k) + nu(i) ) * gr%invrs_dzt(i,k+1) &
+            + lhs_upwind(kp1_mdiag,i,k)
+
+          ! Momentum main diagonal: [ x var_zm(k,<t+1>) ]
+          lhs(k_mdiag,i,k) &
+          = + gr%invrs_dzm(i,k) * ( K_zm(i,k) + nu(i) ) * ( gr%invrs_dzt(i,k+1) + gr%invrs_dzt(i,k) ) &
+            + lhs_upwind(k_mdiag,i,k)
+
+          ! Momentum subdiagonal: [ x var_zm(k-1,<t+1>) ]
+          lhs(km1_mdiag,i,k) &
+          = - gr%invrs_dzm(i,k) * ( K_zm(i,k) + nu(i) ) * gr%invrs_dzt(i,k) &
+            + lhs_upwind(km1_mdiag,i,k)
+
+        end if
+      end do
+    end do ! k = 2, nz-1, 1
+
+    ! k = nz (top level); upper boundary level.
+    ! Only relevant if zero-flux boundary conditions are used.
+
+    if ( .not. l_upwind_Kh_dp_term ) then
+      do i = 1, ngrdcol
+        ! Momentum superdiagonal: [ x var_zm(k+1,<t+1>) ]
+        lhs(kp1_mdiag,i,nz) = zero
+
+        ! Momentum main diagonal: [ x var_zm(k,<t+1>) ]
+        lhs(k_mdiag,i,nz) &
+        = + gr%invrs_dzm(i,nz) * invrs_rho_ds_zm(i,nz) &
+             * ( K_zt(i,nz) + nu(i) ) * rho_ds_zt(i,nz) * gr%invrs_dzt(i,nz)
+
+        ! Momentum subdiagonal: [ x var_zm(k-1,<t+1>) ]
+        lhs(km1_mdiag,i,nz) &
+        = - gr%invrs_dzm(i,nz) * invrs_rho_ds_zm(i,nz) &
+             * ( K_zt(i,nz) + nu(i) ) * rho_ds_zt(i,nz) * gr%invrs_dzt(i,nz)
+      end do
+    else
+      do i = 1, ngrdcol
+        ! Momentum superdiagonal: [ x var_zm(k+1,<t+1>) ]
+        lhs(kp1_mdiag,i,nz) =  zero &
+                              + lhs_upwind(kp1_mdiag,i,nz)
+
+        ! Momentum main diagonal: [ x var_zm(k,<t+1>) ]
+        lhs(k_mdiag,i,nz) &
+        = + gr%invrs_dzm(i,nz) * ( K_zm(i,nz) + nu(i) ) * gr%invrs_dzt(i,nz) &
+          + lhs_upwind(k_mdiag,i,nz)
+
+        ! Momentum subdiagonal: [ x var_zm(k-1,<t+1>) ]
+        lhs(km1_mdiag,i,nz) &
+        = - gr%invrs_dzm(i,nz) * ( K_zm(i,nz) + nu(i) ) * gr%invrs_dzt(i,nz) &
+          + lhs_upwind(km1_mdiag,i,nz)
+      end do
+    end if
 
 
-    elseif ( level > 1 .and. level < gr%nz ) then
+    return
 
-      ! Most of the interior model; normal conditions.
+  end subroutine diffusion_zm_lhs
 
-      ! Momentum superdiagonal: [ x var_zm(k+1,<t+1>) ]
-      lhs(kp1_mdiag) = - invrs_dzm * (K_ztp1+nu(level+1)) * invrs_dztp1
-
-      ! Momentum main diagonal: [ x var_zm(k,<t+1>) ]
-      lhs(k_mdiag)   = + invrs_dzm * (   (K_ztp1+nu(level+1))*invrs_dztp1  &
-                                       + (K_zt+nu(level))*invrs_dzt )
-
-      ! Momentum subdiagonal: [ x var_zm(k-1,<t+1>) ]
-      lhs(km1_mdiag) = - invrs_dzm * (K_zt+nu(level)) * invrs_dzt
-
-
-    elseif ( level == gr%nz ) then
-
-      ! k = gr%nz (top level); upper boundary level.
-      ! Only relevant if zero-flux boundary conditions are used.
-
-      ! Momentum superdiagonal: [ x var_zm(k+1,<t+1>) ]
-      lhs(kp1_mdiag) = 0.0_core_rknd
-
-      ! Momentum main diagonal: [ x var_zm(k,<t+1>) ]
-      lhs(k_mdiag)   = + invrs_dzm * (K_zt+nu(gr%nz)) * invrs_dzt
-
-      ! Momentum subdiagonal: [ x var_zm(k-1,<t+1>) ]
-      lhs(km1_mdiag) = - invrs_dzm * (K_zt+nu(gr%nz)) * invrs_dzt
-
-
-    endif
-
-  end function diffusion_zm_lhs
-
-    !===================================================================================
-    pure subroutine diffusion_zm_lhs_all( K_zt, nu,             & ! Intent(in)
-                                          invrs_dzt, invrs_dzm, & ! Intent(in)
-                                          lhs                   ) ! Intent(out
-    ! Description:
-    !   This subroutine is an optimized version of diffusion_zm_lhs. diffusion_zm_lhs
-    !   returns a length 3 array for any specified grid level. This subroutine returns
-    !   an array of length 3 arrays, one for every specified grid level.
-    ! 
-    ! Notes:
-    !   This subroutine exists for performance concerns. It returns many lhs arrays at
-    !   once so that it can be properly vectorized, see clubb:ticket:834 for detail.
-    ! 
-    !------------------------------------------------------------------------------------
-        use grid_class, only: & 
-            gr       ! Variable(s)
-
-        use clubb_precision, only: &
-            core_rknd ! Variable(s)
-
-        implicit none
-
-        !------------------- Input Variables -------------------
-        real( kind = core_rknd ), dimension(gr%nz), intent(in) ::  & 
-          K_zt,        & ! Coef. of eddy diffusivity at thermo. level (k)   [m^2/s]
-          invrs_dzm,   & ! Inverse of grid spacing over momentum level (k)  [1/m]
-          invrs_dzt,   & ! Inverse of grid spacing over thermo. level (k)   [1/m]
-          nu             ! Background constant coef. of eddy diffusivity    [m^2/s]
-
-        !------------------- Output Variables -------------------
-        real( kind = core_rknd ), dimension(3,gr%nz), intent(out) :: &
-            lhs ! Eddy diffusion elements of the left hand side matrix
-
-        !---------------- Local Variables -------------------
-        integer :: &
-            k   ! Loop variable for current grid level
-
-        !---------------- Begin Code -------------------
-
-        ! Handle lower boundary level
-        lhs(1,1) = - invrs_dzm(1) * ( K_zt(2) + nu(2) ) * invrs_dzt(2)
-        lhs(2,1) = + invrs_dzm(1) * ( K_zt(2) + nu(2) ) * invrs_dzt(2)
-        lhs(3,1) = 0.0_core_rknd
-
-        ! Handle every other level
-        do k = 2, gr%nz-1
-
-            ! Momentum superdiagonal: [ x var_zm(k+1,<t+1>) ]
-            lhs(1,k) = - invrs_dzm(k) * ( K_zt(k+1) + nu(k+1) ) * invrs_dzt(k+1)
-
-            ! Momentum main diagonal: [ x var_zm(k,<t+1>) ]
-            lhs(2,k) = + invrs_dzm(k) * ( ( K_zt(k+1) + nu(k+1) ) * invrs_dzt(k+1)  &
-                                      + ( K_zt(k) + nu(k) ) * invrs_dzt(k) )
-
-            ! Momentum subdiagonal: [ x var_zm(k-1,<t+1>) ]
-            lhs(3,k) = - invrs_dzm(k) * ( K_zt(k) + nu(k) ) * invrs_dzt(k)
-
-        end do
-
-        ! Handle upper boundary level
-        lhs(1,gr%nz) = 0.0_core_rknd
-        lhs(2,gr%nz) = + invrs_dzm(gr%nz) * ( K_zt(gr%nz) + nu(gr%nz) ) * invrs_dzt(gr%nz)
-        lhs(3,gr%nz) = - invrs_dzm(gr%nz) * ( K_zt(gr%nz) + nu(gr%nz) ) * invrs_dzt(gr%nz)
-
-    end subroutine diffusion_zm_lhs_all
+  !=============================================================================
 
 end module diffusion

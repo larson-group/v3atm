@@ -26,11 +26,14 @@ module advance_xp3_module
   contains
 
   !=============================================================================
-  subroutine advance_xp3( dt, rtm, thlm, rtp2, thlp2, wprtp,  & ! Intent(in)
-                          wpthlp, wprtp2, wpthlp2, rho_ds_zm, & ! Intent(in)
-                          invrs_rho_ds_zt, tau_zt,            & ! Intent(in)
-                          sclrm, sclrp2, wpsclrp, wpsclrp2,   & ! Intent(in)
-                          rtp3, thlp3, sclrp3                 ) ! Intent(inout)
+  subroutine advance_xp3( nz, ngrdcol, gr, dt,                       & ! Intent(in)
+                          rtm, thlm, rtp2, thlp2, wprtp,             & ! Intent(in)
+                          wpthlp, wprtp2, wpthlp2, rho_ds_zm,        & ! Intent(in)
+                          invrs_rho_ds_zt, invrs_tau_zt, tau_max_zt, & ! Intent(in)
+                          sclrm, sclrp2, wpsclrp, wpsclrp2,          & ! Intent(in)
+                          l_lmm_stepping,                            & ! Intent(in)
+                          stats_zt,                                  & ! intent(inout)
+                          rtp3, thlp3, sclrp3 )                        ! Intent(inout)
 
     ! Description:
     ! Advance <rt'^3>, <thl'^3>, and <sclr'^3> one model timestep using a
@@ -42,7 +45,7 @@ module advance_xp3_module
     !-----------------------------------------------------------------------
 
     use grid_class, only: &
-        gr    ! Variable Type
+        grid ! Type
 
     use constants_clubb, only: &
         rt_tol,  & ! Variable(s)
@@ -55,13 +58,21 @@ module advance_xp3_module
     use clubb_precision, only: &
         core_rknd    ! Variable(s)
 
+    use stats_type, only: stats ! Type
+
     implicit none
 
-    ! Input Variables
+    ! --------------------- Input Variables ---------------------
+    integer, intent(in) :: &
+      nz, &
+      ngrdcol
+    
+    type (grid), target, intent(in) :: gr
+  
     real( kind = core_rknd ), intent(in) :: &
       dt                 ! Model timestep                            [s]
 
-    real( kind = core_rknd ), dimension(gr%nz), intent(in) :: &
+    real( kind = core_rknd ), dimension(ngrdcol,nz), intent(in) :: &
       rtm,             & ! Mean (overall) of rt (thermo. levels)  [kg/kg]
       thlm,            & ! Mean (overall) of thl (thermo. levels) [K]
       rtp2,            & ! Variance (overall) of rt (m-levs.)     [kg^2/kg^2]
@@ -72,69 +83,81 @@ module advance_xp3_module
       wpthlp2,         & ! <w'thl'^2> (thermodynamic levels)      [m/s K^2]
       rho_ds_zm,       & ! Dry, static density on momentum levels      [kg/m^3]
       invrs_rho_ds_zt, & ! Inv. dry, static density at thermo. levels  [m^3/kg]
-      tau_zt             ! Time-scale tau on thermodynamic levels      [s]
+      invrs_tau_zt,    & ! Inverse time-scale tau on thermodynamic levels [1/s]
+      tau_max_zt         ! Max. allowable eddy dissipation time scale on t-levs[s]
 
-    real( kind = core_rknd ), dimension(gr%nz,sclr_dim), intent(in) :: &
+    real( kind = core_rknd ), dimension(ngrdcol,nz,sclr_dim), intent(in) :: &
       sclrm,    & ! Mean (overall) of sclr (thermo. levels) [sclr units]
       sclrp2,   & ! Variance (overall) of sclr (m-levs.)    [(sclr units)^2]
       wpsclrp,  & ! Turbulent flux of sclr (momentum levs.) [m/s(sclr units)]
       wpsclrp2    ! <w'sclr'^2> (thermodynamic levels)      [m/s(sclr units)^2]
 
-    ! Input/Output Variables
-    real( kind = core_rknd ), dimension(gr%nz), intent(inout) :: &
+    logical, intent(in) :: &
+      l_lmm_stepping    ! Apply Linear Multistep Method (LMM) Stepping
+
+    ! --------------------- Input/Output Variables ---------------------
+    type (stats), target, dimension(ngrdcol), intent(inout) :: &
+      stats_zt
+      
+    real( kind = core_rknd ), dimension(ngrdcol,nz), intent(inout) :: &
       rtp3,  & ! <rt'^3> (thermodynamic levels)     [kg^3/kg^3]
       thlp3    ! <thl'^3> (thermodynamic levels)    [K^3]
 
-    real( kind = core_rknd ), dimension(gr%nz,sclr_dim), intent(inout) :: &
+    real( kind = core_rknd ), dimension(ngrdcol,nz,sclr_dim), intent(inout) :: &
       sclrp3    ! <sclr'^3> (thermodynamic levels)    [(sclr units)^3]
 
-    ! Local Variable
-    integer :: i    ! Loop index
+    ! --------------------- Local Variable ---------------------
+    integer :: i, k, sclr    ! Loop index
 
 
     ! Advance <rt'^3> one model timestep or calculate <rt'^3> using a
     ! steady-state approximation.
-    call advance_xp3_simplified( xp3_rtp3, dt, rtm, & ! Intent(in)
-                                 rtp2, wprtp,       & ! Intent(in)
-                                 wprtp2, rho_ds_zm, & ! Intent(in)
-                                 invrs_rho_ds_zt,   & ! Intent(in)
-                                 tau_zt, rt_tol,    & ! Intent(in)
-                                 rtp3               ) ! Intent(inout)
+    call advance_xp3_simplified( nz, ngrdcol, gr, xp3_rtp3, dt, & ! Intent(in)
+                                 rtm, rtp2, wprtp,              & ! Intent(in)
+                                 wprtp2, rho_ds_zm,             & ! Intent(in)
+                                 invrs_rho_ds_zt,               & ! Intent(in)
+                                 invrs_tau_zt, tau_max_zt,      & ! Intent(in) 
+                                 rt_tol, l_lmm_stepping,        & ! Intent(in)
+                                 stats_zt,                      & ! intent(inout)
+                                 rtp3 )                           ! Intent(inout)
 
     ! Advance <thl'^3> one model timestep or calculate <thl'^3> using a
     ! steady-state approximation.
-    call advance_xp3_simplified( xp3_thlp3, dt, thlm, & ! Intent(in)
-                                 thlp2, wpthlp,       & ! Intent(in)
-                                 wpthlp2, rho_ds_zm,  & ! Intent(in)
-                                 invrs_rho_ds_zt,     & ! Intent(in)
-                                 tau_zt, thl_tol,     & ! Intent(in)
-                                 thlp3                ) ! Intent(inout)
+    call advance_xp3_simplified( nz, ngrdcol, gr, xp3_thlp3, dt,  & ! Intent(in)
+                                 thlm, thlp2, wpthlp,             & ! Intent(in)
+                                 wpthlp2, rho_ds_zm,              & ! Intent(in)
+                                 invrs_rho_ds_zt,                 & ! Intent(in)
+                                 invrs_tau_zt, tau_max_zt,        & ! Intent(in) 
+                                 thl_tol, l_lmm_stepping,         & ! Intent(in)
+                                 stats_zt,                        & ! intent(inout)
+                                 thlp3 )                            ! Intent(inout)
 
     ! Advance <sclr'^3> one model timestep or calculate <sclr'^3> using a
     ! steady-state approximation.
-    do i = 1, sclr_dim, 1
-
-       call advance_xp3_simplified( xp3_sclrp3, dt, sclrm(:,i), & ! In
-                                    sclrp2(:,i), wpsclrp(:,i),  & ! In
-                                    wpsclrp2(:,i), rho_ds_zm,   & ! In
-                                    invrs_rho_ds_zt,            & ! In
-                                    tau_zt, sclr_tol(i),        & ! In
-                                    sclrp3(:,i)                 ) ! In/Out
-
-    enddo ! i = 1, sclr_dim
-
+    do sclr = 1, sclr_dim, 1
+      call advance_xp3_simplified( nz, ngrdcol, gr, xp3_sclrp3, dt,                     & ! In
+                                  sclrm(:,:,sclr), sclrp2(:,:,sclr), wpsclrp(:,:,sclr), & ! In
+                                  wpsclrp2(:,:,sclr), rho_ds_zm,                        & ! In
+                                  invrs_rho_ds_zt,                                      & ! In
+                                  invrs_tau_zt, tau_max_zt,                             & ! In 
+                                  sclr_tol(sclr), l_lmm_stepping,                       & ! In
+                                  stats_zt,                                             & ! In/Out
+                                  sclrp3(:,:,sclr) )                                      ! In/Out
+    end do ! i = 1, sclr_dim
 
     return
 
   end subroutine advance_xp3
 
   !=============================================================================
-  subroutine advance_xp3_simplified( solve_type, dt, xm, & ! Intent(in)
-                                     xp2, wpxp,          & ! Intent(in)
-                                     wpxp2, rho_ds_zm,   & ! Intent(in)
-                                     invrs_rho_ds_zt,    & ! Intent(in)
-                                     tau_zt, x_tol,      & ! Intent(in)
-                                     xp3                 ) ! Intent(inout)
+  subroutine advance_xp3_simplified( nz, ngrdcol, gr, solve_type, dt, & ! Intent(in)
+                                     xm, xp2, wpxp,                   & ! Intent(in)
+                                     wpxp2, rho_ds_zm,                & ! Intent(in)
+                                     invrs_rho_ds_zt,                 & ! Intent(in)
+                                     invrs_tau_zt, tau_max_zt,        & ! Intent(in) 
+                                     x_tol, l_lmm_stepping,           & ! Intent(in)
+                                     stats_zt,                        & ! intent(inout)
+                                     xp3 )                              ! Intent(inout)
 
     ! Description:
     ! Predicts the value of <x'^3> using a simplified form of the <x'^3>
@@ -236,12 +259,13 @@ module advance_xp3_module
     !-----------------------------------------------------------------------
 
     use grid_class, only: &
-        gr,    & ! Variable Type
+        grid, & ! Type
         zm2zt, & ! Procedure(s)
         zt2zm
 
     use constants_clubb, only: &
-        one,  & ! Variable(s)
+        one,      & ! Variable(s)
+        one_half, &
         zero
 
     use stats_type_utilities, only: &
@@ -258,46 +282,63 @@ module advance_xp3_module
         ithlp3_tp,    &
         ithlp3_ac,    &
         ithlp3_dp,    &
-        stats_zt,     &
         l_stats_samp
 
     use clubb_precision, only: &
         core_rknd    ! Variable(s)
 
-    implicit none
+    use stats_type, only: stats ! Type
 
-    ! Input Variables
+    implicit none
+ 
+    ! ----------------------- Input Variables -----------------------
+    integer, intent(in) :: &
+      nz, &
+      ngrdcol
+    
+    type (grid), target, intent(in) :: gr
+  
     integer, intent(in) :: &
       solve_type    ! Flag for solving for rtp3, thlp3, or sclrp3
 
     real( kind = core_rknd ), intent(in) :: &
       dt                 ! Model timestep                            [s]
 
-    real( kind = core_rknd ), dimension(gr%nz), intent(in) :: &
+    real( kind = core_rknd ), dimension(ngrdcol,nz), intent(in) :: &
       xm,              & ! Mean (overall) of x (thermo. levels) [(x units)]
       xp2,             & ! Variance (overall) of x (m-levs.)    [(x units)^2]
       wpxp,            & ! Turbulent flux of x (momentum levs.) [m/s(x units)]
       wpxp2,           & ! <w'x'^2> (thermodynamic levels)      [m/s(x units)^2]
       rho_ds_zm,       & ! Dry, static density on momentum levels      [kg/m^3]
       invrs_rho_ds_zt, & ! Inv. dry, static density at thermo. levels  [m^3/kg]
-      tau_zt             ! Time-scale tau on thermodynamic levels      [s]
+      invrs_tau_zt,    & ! Inverse time-scale tau on thermodynamic levels  [1/s]
+      tau_max_zt         ! Max. allowable eddy dissipation time scale on t-levs[s]
 
     real( kind = core_rknd ), intent(in) :: &
       x_tol    ! Tolerance value of x                           [(x units)]
 
-    ! Input/Output Variable
-    real( kind = core_rknd ), dimension(gr%nz), intent(inout) :: &
+    logical, intent(in) :: &
+      l_lmm_stepping    ! Apply Linear Multistep Method (LMM) Stepping
+
+    ! ----------------------- Input/Output Variable -----------------------
+    type (stats), target, dimension(ngrdcol), intent(inout) :: &
+      stats_zt
+      
+    real( kind = core_rknd ), dimension(ngrdcol,nz), intent(inout) :: &
       xp3    ! <x'^3> (thermodynamic levels)    [(x units)^3]
 
-    ! Local Variables
-    real( kind = core_rknd ), dimension(gr%nz) :: &
+    ! ----------------------- Local Variables -----------------------
+    real( kind = core_rknd ), dimension(ngrdcol,nz) :: &
+      xp3_old    ! Saved <x'^3> (thermodynamic levels)    [(x units)^3]
+
+    real( kind = core_rknd ), dimension(ngrdcol,nz) :: &
       xm_zm,   & ! Mean of x interpolated to momentum levels     [(x units)]
       xp2_zt,  & ! Variance of x interpolated to thermo. levels  [(x units)^2]
       term_tp, & ! <x'^3> turbulent production term              [(x units)^3/s]
       term_ac    ! <x'^3> accumulation term                      [(x units)^3/s]
 
     integer :: &
-      k, km1     ! Grid indices
+      i, k, km1     ! Grid indices
 
     integer :: &
       ixp3_bt, & ! Budget statistics index for <x'^3> time tendency
@@ -313,96 +354,110 @@ module advance_xp3_module
     logical, parameter :: &
       l_predict_xp3 = .false.
 
+    ! ----------------------- Begin Code -----------------------
 
     if ( l_stats_samp ) then
 
-       select case ( solve_type )
-       case( xp3_rtp3 )
-          ! Budget stats for rtp3
-          ixp3_bt = irtp3_bt
-          ixp3_tp = irtp3_tp
-          ixp3_ac = irtp3_ac
-          ixp3_dp = irtp3_dp
-       case( xp3_thlp3 )
-          ! Budget stats for thlp3
-          ixp3_bt = ithlp3_bt
-          ixp3_tp = ithlp3_tp
-          ixp3_ac = ithlp3_ac
-          ixp3_dp = ithlp3_dp
-       case default
-          ! Budgets aren't setup for the passive scalars
-          ixp3_bt = 0
-          ixp3_tp = 0
-          ixp3_ac = 0
-          ixp3_dp = 0
-       end select ! solve_type
+      select case ( solve_type )
+      case( xp3_rtp3 )
+        ! Budget stats for rtp3
+        ixp3_bt = irtp3_bt
+        ixp3_tp = irtp3_tp
+        ixp3_ac = irtp3_ac
+        ixp3_dp = irtp3_dp
+      case( xp3_thlp3 )
+        ! Budget stats for thlp3
+        ixp3_bt = ithlp3_bt
+        ixp3_tp = ithlp3_tp
+        ixp3_ac = ithlp3_ac
+        ixp3_dp = ithlp3_dp
+      case default
+        ! Budgets aren't setup for the passive scalars
+        ixp3_bt = 0
+        ixp3_tp = 0
+        ixp3_ac = 0
+        ixp3_dp = 0
+      end select ! solve_type
 
-       if ( l_predict_xp3 ) then
-          call stat_begin_update( ixp3_bt, xp3 / dt, & ! Intent(in)
-                                  stats_zt           ) ! Intent(inout)
-       endif ! l_predict_xp3
+      if ( l_predict_xp3 ) then
+        do i = 1, ngrdcol
+          call stat_begin_update( nz, ixp3_bt, xp3(i,:) / dt, & ! Intent(in)
+                                  stats_zt(i) )                 ! Intent(inout)
+        end do
+      end if ! l_predict_xp3
 
-    endif ! l_stats_samp
+    end if ! l_stats_samp
 
     ! Initialize variables
     term_tp = zero
     term_ac = zero
 
     ! Interpolate <x> to momentum levels.
-    xm_zm = zt2zm( xm )
+    xm_zm = zt2zm( nz, ngrdcol, gr, xm )
 
     ! Interpolate <x'^2> to thermodynamic levels.
-    xp2_zt = max( zm2zt( xp2 ), x_tol**2 )  ! Positive definite quantity
+    xp2_zt = max( zm2zt( nz, ngrdcol, gr, xp2 ), x_tol**2 )  ! Positive definite quantity
 
-    do k = 2, gr%nz-1, 1
+    do k = 2, nz-1, 1
+      do i = 1, ngrdcol
 
-      ! Define the km1 index.
-      km1 = max( k-1, 1 )
+        ! Define the km1 index.
+        km1 = max( k-1, 1 )
 
-      ! Calculate the <x'^3> turbulent production (tp) term.
-      term_tp(k) = term_tp_rhs( xp2_zt(k), wpxp(k), wpxp(km1), &
-                                rho_ds_zm(k), rho_ds_zm(km1), &
-                                invrs_rho_ds_zt(k), &
-                                gr%invrs_dzt(k) )
+        ! Calculate the <x'^3> turbulent production (tp) term.
+        term_tp(i,k) = term_tp_rhs( xp2_zt(i,k), wpxp(i,k), wpxp(i,km1), &
+                                    rho_ds_zm(i,k), rho_ds_zm(i,km1), &
+                                    invrs_rho_ds_zt(i,k), &
+                                    gr%invrs_dzt(i,k) )
 
-      ! Calculate the <x'^3> accumulation (ac) term.
-      term_ac(k) = term_ac_rhs( xm_zm(k), xm_zm(km1), wpxp2(k), &
-                                gr%invrs_dzt(k) )
+        ! Calculate the <x'^3> accumulation (ac) term.
+        term_ac(i,k) = term_ac_rhs( xm_zm(i,k), xm_zm(i,km1), wpxp2(i,k), &
+                                  gr%invrs_dzt(i,k) )
 
-      if ( l_predict_xp3 ) then
+        if ( l_predict_xp3 ) then
 
-         ! Advance <x'^3> one time step.
-         xp3(k) = ( ( xp3(k) / dt ) + term_tp(k) + term_ac(k) ) &
-                  / ( ( one / dt ) + ( C_xp3_dissipation / tau_zt(k) ) )
+           if ( l_lmm_stepping ) then
+              xp3_old(i,k) = xp3(i,k)
+           endif ! l_lmm_stepping
 
-      else
+           ! Advance <x'^3> one time step.
+           xp3(i,k) = ( ( xp3(i,k) / dt ) + term_tp(i,k) + term_ac(i,k) ) &
+                      / ( ( one / dt ) + ( C_xp3_dissipation * invrs_tau_zt(i,k) ) )
 
-         ! Calculate <x'^3> using the steady-state approximation.
-         xp3(k) = ( tau_zt(k) / C_xp3_dissipation ) &
-                  * ( term_tp(k) + term_ac(k) )
+           if ( l_lmm_stepping ) then
+              xp3(i,k) = one_half * ( xp3_old(i,k) + xp3(i,k) )
+           endif ! l_lmm_stepping
 
-      endif ! l_predict_xp3
+        else
 
-    enddo ! k = 2, gr%nz-1, 1
+           ! Calculate <x'^3> using the steady-state approximation.
+           xp3(i,k) = min( one / invrs_tau_zt(i,k), tau_max_zt(i,k) ) * one / C_xp3_dissipation &
+                      * ( term_tp(i,k) + term_ac(i,k) )
+
+        endif ! l_predict_xp3
+        
+      end do
+    end do ! k = 2, gr%nz-1, 1
 
     ! Set Boundary Conditions
-    xp3(1) = zero
-    xp3(gr%nz) = zero
+    xp3(:,1) = zero
+    xp3(:,nz) = zero
 
     if ( l_stats_samp ) then
+      do i = 1, ngrdcol
+        call stat_update_var( ixp3_tp, term_tp(i,:),  & ! intent(in)
+                              stats_zt(i) )             ! intent(inout)
+        call stat_update_var( ixp3_ac, term_ac(i,:),  & ! intent(in)
+                              stats_zt(i) )             ! intent(inout)
+        call stat_update_var( ixp3_dp, -(C_xp3_dissipation * invrs_tau_zt(i,:))*xp3(i,:), & ! intent(in)
+                              stats_zt(i) ) ! intent(inout)
 
-       call stat_update_var( ixp3_tp, term_tp, stats_zt )
-       call stat_update_var( ixp3_ac, term_ac, stats_zt )
-       call stat_update_var( ixp3_dp, -(C_xp3_dissipation/tau_zt)*xp3, &
-                             stats_zt )
-
-       if ( l_predict_xp3 ) then
-          call stat_end_update( ixp3_bt, xp3 / dt, & ! Intent(in)
-                                stats_zt           ) ! Intent(inout)
-       endif ! l_predict_xp3
-
-    endif ! l_stats_samp
-
+        if ( l_predict_xp3 ) then
+          call stat_end_update( nz, ixp3_bt, xp3(i,:) / dt, & ! Intent(in)
+                                stats_zt(i) )                 ! Intent(inout)
+        end if ! l_predict_xp3
+      end do
+    end if ! l_stats_samp
 
     return
 

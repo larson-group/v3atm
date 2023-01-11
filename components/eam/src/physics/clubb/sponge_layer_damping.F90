@@ -75,7 +75,8 @@ module sponge_layer_damping
   contains
 
   !=============================================================================
-  function sponge_damp_xm( dt, z, xm_ref, xm, damping_profile ) result( xm_p )
+  function sponge_damp_xm( nz, dt, z, zm, &
+                           xm_ref, xm, damping_profile ) result( xm_p )
 
     ! Description:
     ! Damps specified mean field toward a reference profile.  The module must be
@@ -87,13 +88,13 @@ module sponge_layer_damping
 
     !  "Sponge"-layer damping at the domain top region
 
-    use grid_class, only: &
-        gr    ! Variable(s)
-
     use clubb_precision, only: &
         core_rknd    ! Variable(s)
 
     implicit none
+
+    integer, intent(in) :: &
+      nz
 
     ! External
     intrinsic :: allocated
@@ -102,16 +103,17 @@ module sponge_layer_damping
     real( kind = core_rknd ), intent(in) :: &
       dt    ! Model Timestep  [s]
 
-    real( kind = core_rknd ), dimension(gr%nz), intent(in) :: &
+    real( kind = core_rknd ), dimension(nz), intent(in) :: &
       z,      & ! Height of model grid levels                [m]
       xm_ref, & ! Reference profile of x to damp xm towards  [units vary]
-      xm        ! Mean field being damped                    [units vary]
+      xm,     & ! Mean field being damped                    [units vary]
+      zm        ! Momentum grid
 
     type(sponge_damp_profile), intent(in) :: &
       damping_profile
 
     ! Output Variable
-    real( kind = core_rknd ), dimension(gr%nz) :: &
+    real( kind = core_rknd ), dimension(nz) :: &
       xm_p   ! Damped value of xm  [units_vary]
 
     ! Local Variable(s)
@@ -126,10 +128,10 @@ module sponge_layer_damping
 
        xm_p = xm
      
-       do k = gr%nz, 1, -1
+       do k = nz, 1, -1
 
-          ! The height of the model top is gr%zm(gr%nz).
-          if ( gr%zm(gr%nz) - z(k) < damping_profile%sponge_layer_depth ) then
+          ! The height of the model top is zm(nz).
+          if ( zm(nz) - z(k) < damping_profile%sponge_layer_depth ) then
 
              ! Vince Larson used implicit discretization in order to 
              ! reduce noise in rtm in cloud_feedback_s12 (CGILS) 
@@ -143,19 +145,19 @@ module sponge_layer_damping
                              ( 1.0_core_rknd + dt_on_tau )
              ! End Vince Larson's change
 
-          else ! gr%zm(gr%nz) - z(k) >= damping_profile%sponge_layer_depth
+          else ! zm(nz) - z(k) >= damping_profile%sponge_layer_depth
 
              ! Below sponge damping layer; exit loop.
              exit
 
-          endif ! gr%zm(gr%nz) - z(k) < damping_profile%sponge_layer_depth
+          endif ! zm(nz) - z(k) < damping_profile%sponge_layer_depth
 
 
-       enddo ! k = gr%nz, 1, -1
+       enddo ! k = nz, 1, -1
 
     else
 
-       stop "tau_sponge_damp in sponge_damp_xm used before initialization"
+       error stop "tau_sponge_damp in sponge_damp_xm used before initialization"
 
     endif
 
@@ -165,7 +167,8 @@ module sponge_layer_damping
   end function sponge_damp_xm
 
   !=============================================================================
-  function sponge_damp_xp2( dt, z, xp2, x_tol_sqd, damping_profile ) &
+  function sponge_damp_xp2( nz, dt, zm, xp2, x_tol_sqd, &
+                            damping_profile ) &
   result( xp2_damped )
 
     ! Description:
@@ -206,9 +209,6 @@ module sponge_layer_damping
     ! References:
     !-----------------------------------------------------------------------
 
-    use grid_class, only: &
-        gr    ! Variable(s)
-
     use constants_clubb, only: &
         one    ! Constant(s)
 
@@ -217,12 +217,15 @@ module sponge_layer_damping
 
     implicit none
 
+    integer, intent(in) :: &
+      nz
+
     ! Input Variable(s)
     real( kind = core_rknd ), intent(in) :: &
       dt    ! Model Timestep  [s]
 
-    real( kind = core_rknd ), dimension(gr%nz), intent(in) :: &
-      z,   & ! Height of model grid levels               [m]
+    real( kind = core_rknd ), dimension(nz), intent(in) :: &
+      zm,  & ! Height of model grid levels               [m]
       xp2    ! Variance of x, <x'^2>, prior to damping   [units vary]
 
     real( kind = core_rknd ), intent(in) :: &
@@ -232,7 +235,7 @@ module sponge_layer_damping
       damping_profile
 
     ! Output Variable
-    real( kind = core_rknd ), dimension(gr%nz) :: &
+    real( kind = core_rknd ), dimension(nz) :: &
       xp2_damped    ! Variance of x, <x'^2>, after damping   [units vary]
 
     ! Local Variable(s)
@@ -250,10 +253,10 @@ module sponge_layer_damping
        ! at any levels where "sponge"-layer damping occurs.
        xp2_damped = xp2
      
-       do k = gr%nz, 1, -1
+       do k = nz, 1, -1
 
-          ! The height of the model top is gr%zm(gr%nz).
-          if ( gr%zm(gr%nz) - z(k) < damping_profile%sponge_layer_depth ) then
+          ! The height of the model top is zm(nz).
+          if ( zm(nz) - zm(k) < damping_profile%sponge_layer_depth ) then
 
              ! Calculate the value of delta_t / tau at the grid level.
              dt_on_tau = dt / damping_profile%tau_sponge_damp(k)
@@ -265,19 +268,19 @@ module sponge_layer_damping
              ! x_tol^2.
              xp2_damped(k) = max( xp2_damped(k), x_tol_sqd )
 
-          else ! gr%zm(gr%nz) - z(k) >= damping_profile%sponge_layer_depth
+          else ! zm(nz) - zm(k) >= damping_profile%sponge_layer_depth
 
              ! Below sponge damping layer; exit loop.
              exit
 
-          endif ! gr%zm(gr%nz) - z(k) < damping_profile%sponge_layer_depth
+          endif ! zm(nz) - zm(k) < damping_profile%sponge_layer_depth
 
 
-       enddo ! k = gr%nz, 1, -1
+       enddo ! k = nz, 1, -1
 
     else
 
-       stop "tau_sponge_damp in sponge_damp_xp2 used before initialization"
+       error stop "tau_sponge_damp in sponge_damp_xp2 used before initialization"
 
     endif
 
@@ -287,7 +290,8 @@ module sponge_layer_damping
   end function sponge_damp_xp2
 
   !=============================================================================
-  function sponge_damp_xp3( dt, z, xp3, damping_profile ) &
+  function sponge_damp_xp3( nz, dt, z, zm, xp3, &
+                            damping_profile ) &
   result( xp3_damped )
 
     ! Description:
@@ -326,9 +330,6 @@ module sponge_layer_damping
     ! References:
     !-----------------------------------------------------------------------
 
-    use grid_class, only: &
-        gr    ! Variable(s)
-
     use constants_clubb, only: &
         one    ! Constant(s)
 
@@ -337,19 +338,23 @@ module sponge_layer_damping
 
     implicit none
 
+    integer, intent(in) :: &
+      nz
+
     ! Input Variable(s)
     real( kind = core_rknd ), intent(in) :: &
       dt    ! Model Timestep  [s]
 
-    real( kind = core_rknd ), dimension(gr%nz), intent(in) :: &
+    real( kind = core_rknd ), dimension(nz), intent(in) :: &
       z,   & ! Height of model grid levels     [m]
-      xp3    ! <x'^3> prior to damping         [units vary]
+      xp3, & ! <x'^3> prior to damping         [units vary]
+      zm     ! Momentum grid
 
     type(sponge_damp_profile), intent(in) :: &
       damping_profile
 
     ! Output Variable
-    real( kind = core_rknd ), dimension(gr%nz) :: &
+    real( kind = core_rknd ), dimension(nz) :: &
       xp3_damped    ! <x'^3> after damping   [units vary]
 
     ! Local Variable(s)
@@ -367,10 +372,10 @@ module sponge_layer_damping
        ! at any levels where "sponge"-layer damping occurs.
        xp3_damped = xp3
      
-       do k = gr%nz, 1, -1
+       do k = nz, 1, -1
 
-          ! The height of the model top is gr%zm(gr%nz).
-          if ( gr%zm(gr%nz) - z(k) < damping_profile%sponge_layer_depth ) then
+          ! The height of the model top is zm(nz).
+          if ( zm(nz) - z(k) < damping_profile%sponge_layer_depth ) then
 
              ! Calculate the value of delta_t / tau at the grid level.
              dt_on_tau = dt / damping_profile%tau_sponge_damp(k)
@@ -378,19 +383,19 @@ module sponge_layer_damping
              ! Calculate the damped value of <x'^3>.
              xp3_damped(k) = ( one - dt_on_tau )**3 * xp3(k)
 
-          else ! gr%zm(gr%nz) - z(k) >= damping_profile%sponge_layer_depth
+          else ! zm(nz) - z(k) >= damping_profile%sponge_layer_depth
 
              ! Below sponge damping layer; exit loop.
              exit
 
-          endif ! gr%zm(gr%nz) - z(k) < damping_profile%sponge_layer_depth
+          endif ! zm(nz) - z(k) < damping_profile%sponge_layer_depth
 
 
-       enddo ! k = gr%nz, 1, -1
+       enddo ! k = nz, 1, -1
 
     else
 
-       stop "tau_sponge_damp in sponge_damp_xp3 used before initialization"
+       error stop "tau_sponge_damp in sponge_damp_xp3 used before initialization"
 
     endif
 
@@ -400,7 +405,8 @@ module sponge_layer_damping
   end function sponge_damp_xp3
 
   !=============================================================================
-  subroutine initialize_tau_sponge_damp( dt, z, settings, damping_profile )
+  subroutine initialize_tau_sponge_damp( gr, dt, z, settings, &
+                                         damping_profile )
 
     ! Description:
     ! Initialize time scale, tau_sponge_damp, used for damping.  The time scale
@@ -424,12 +430,14 @@ module sponge_layer_damping
         fstderr
 
     use grid_class, only: &
-        gr    ! Variable(s)
+        grid ! Type
 
 !    use interpolation, only: &
 !        lin_interpolate_two_points    ! Procedure(s)
 
     implicit none
+
+    type (grid), target, intent(in) :: gr
 
     ! Input Variable(s)
     real( kind = core_rknd ), intent(in) :: &
@@ -458,30 +466,30 @@ module sponge_layer_damping
     allocate( damping_profile%tau_sponge_damp(1:gr%nz) )
 
     ! Calculate the depth of the sponge layer.
-    ! The height of the model top is gr%zm(gr%nz).
+    ! The height of the model top is gr%zm(1,gr%nz).
     damping_profile%sponge_layer_depth &
-    = settings%sponge_damp_depth * gr%zm(gr%nz)
+    = settings%sponge_damp_depth * gr%zm(1,gr%nz)
 
     ! Check the value of tau_sponge_damp_min.
     if ( settings%tau_sponge_damp_min < two * dt ) then
        write(fstderr,*) "Error:  tau_sponge_damp_min is too small!"
        write(fstderr,*) "It must be at least 2.0 * dt"
-       stop
+       error stop
     endif
 
     ! Calculate the value of the damping time scale, tau_sponge_damp, at levels
     ! that are within the sponge damping layer.
     do k = gr%nz, 1, -1
 
-       ! The height of the model top is gr%zm(gr%nz).
-       if ( gr%zm(gr%nz) - z(k) < damping_profile%sponge_layer_depth ) then
+       ! The height of the model top is gr%zm(1,gr%nz).
+       if ( gr%zm(1,gr%nz) - z(k) < damping_profile%sponge_layer_depth ) then
 
           ! Vince Larson added code to use standard linear interpolation.
           ! Brian Griffin reverted the linear interpolation in order to use code
           ! that is similar to what is found in SAM LES.
 
           tau_sponge_damp_exponent &
-          = ( gr%zm(gr%nz) - z(k) ) / damping_profile%sponge_layer_depth
+          = ( gr%zm(1,gr%nz) - z(k) ) / damping_profile%sponge_layer_depth
 
           damping_profile%tau_sponge_damp(k) &
           = settings%tau_sponge_damp_min &
@@ -489,8 +497,8 @@ module sponge_layer_damping
                 / settings%tau_sponge_damp_min )**tau_sponge_damp_exponent
 
           !damping_profile%tau_sponge_damp(k) &
-          != lin_interpolate_two_points( z(k), gr%zm(gr%nz), &
-          !                              gr%zm(gr%nz) &
+          != lin_interpolate_two_points( z(k), gr%zm(1,gr%nz), &
+          !                              gr%zm(1,gr%nz) &
           !                              - damping_profile%sponge_layer_depth, &
           !                              settings%tau_sponge_damp_min, &
           !                              settings%tau_sponge_damp_max )
@@ -498,12 +506,12 @@ module sponge_layer_damping
           ! End Vince Larson's change
           ! End Brian Griffin's rebellious reversion.
 
-       else ! gr%zm(gr%nz) - z(k) >= damping_profile%sponge_layer_depth
+       else ! gr%zm(1,gr%nz) - z(k) >= damping_profile%sponge_layer_depth
 
           ! Below sponge damping layer; exit loop.
           exit
 
-       endif ! gr%zm(gr%nz) - z(k) < damping_profile%sponge_layer_depth
+       endif ! gr%zm(1,gr%nz) - z(k) < damping_profile%sponge_layer_depth
 
     enddo ! k = gr%nz, 1, -1
 
