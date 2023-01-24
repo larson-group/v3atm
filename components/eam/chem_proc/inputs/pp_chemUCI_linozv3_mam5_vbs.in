@@ -36,6 +36,7 @@ SPECIES
   CH3CO3
   ISOP -> C5H8
   ISOPO2 -> HOCH2COOCH3CHCH2
+  C10H16
   MVKMACR -> C4H6O
 * MVKMACR = sum of MVK -> CH2CHCOCH3 + MACR -> CH2CCH3CHO
   MVKO2 -> C4H7O4
@@ -48,7 +49,14 @@ SPECIES
   DMS -> C2H6S
   SO2 -> O2S
   H2SO4
-  SOAG -> C
+  SOAG0 -> C15H38O2
+  SOAG15 ->  C15H38O2
+  SOAG24 ->  C15H38O2
+  SOAG31 ->  C15H38O2
+  SOAG32 ->  C15H38O2
+  SOAG33 ->  C15H38O2
+  SOAG34 ->  C15H38O2
+  SOAG35 ->  C15H38O2
   so4_a1 -> NH4HSO4
   so4_a2 -> NH4HSO4
   so4_a3 -> NH4HSO4
@@ -57,9 +65,9 @@ SPECIES
 * pom_a2 does not exist
   pom_a3 -> C
   pom_a4 -> C
-  soa_a1 -> C
-  soa_a2 -> C
-  soa_a3 -> C
+  soa_a1 -> C15H38O2
+  soa_a2 -> C15H38O2
+  soa_a3 -> C15H38O2
   bc_a1 -> C
 * bc_a2 does not exist
   bc_a3 -> C
@@ -99,10 +107,9 @@ Solution Classes
  Explicit
    CO, C2H6, C3H8, CH3COCH3
    E90, N2OLNZ, NOYLNZ, CH4LNZ, H2OLNZ
-   DMS, SO2, H2SO4, SOAG
+   DMS, SO2, H2SO4
    so4_a1,  so4_a2,  so4_a3,  so4_a5
    pom_a1,           pom_a3,  pom_a4
-   soa_a1,  soa_a2,  soa_a3
    bc_a1,            bc_a3,   bc_a4
    dst_a1,           dst_a3
    ncl_a1,  ncl_a2,  ncl_a3
@@ -114,7 +121,10 @@ Solution Classes
    O3, OH, HO2, H2O2, CH2O, CH3O2, CH3OOH
    NO, NO2, NO3, N2O5, HNO3, HO2NO2, PAN
    C2H5O2, C2H5OOH, CH3CHO, CH3CO3, C2H4, ROHO2
-   ISOP, ISOPO2, MVKMACR, MVKO2
+   ISOP, ISOPO2, C10H16, MVKMACR, MVKO2
+   soa_a1,  soa_a2,  soa_a3
+   SOAG0, SOAG15, SOAG24, SOAG31
+   SOAG32, SOAG33, SOAG34, SOAG35
  End Implicit
 
 End Solution Classes
@@ -153,6 +163,9 @@ CHEMISTRY
 *        with Fast-J update to merge values w/[jmacr] = 1/3[jmvk] ?
 *             MACR +hv -> CH2O + 2.0*CO + CH3O2 + HO2
 *             MVK + hv -> 3*CH2O + CO    **final products estimated
+ [jsoa_a1->,.0004*jno2]  soa_a1 + hv ->
+ [jsoa_a2->,.0004*jno2]  soa_a2 + hv ->
+ [jsoa_a3->,.0004*jno2]  soa_a3 + hv ->
  End Photolysis
 
  Reactions
@@ -201,11 +214,11 @@ CHEMISTRY
 [HO2NO2f]  NO2 + HO2 + M -> HO2NO2 + M            ; 1.90e-31, 3.4,  4.00e-12, 0.3, 0.6
 [N2O5f]  NO2 + NO3 + M -> N2O5 + M                ; 2.40E-30, 3.0,  1.60E-12,-0.1, 0.6
 [PANf]   CH3CO3 + NO2 + M -> PAN + M              ; 9.70E-29, 5.6,  9.30E-12, 1.5, 0.6
-[uci7]   HO2NO2 -> HO2 + NO2                      ; 2.10E-27, 10900
+[uci7]   HO2NO2 + M -> HO2 + NO2 + M              ; 2.10E-27, 10900
 *     k[uci7] -> k[HO2NO2] / k[uci7]
-[uci8]   N2O5 -> NO2 + NO3                        ; 5.80E-27, 10840
+[uci8]   N2O5 + M -> NO2 + NO3 + M                ; 5.80E-27, 10840
 *     k[uci8] -> k[N2O5] / k[uci8]
-[uci9]   PAN -> CH3CO3 + NO2                      ; 9.00E-29, 14000
+[uci9]   PAN + M -> CH3CO3 + NO2 + M              ; 9.00E-29, 14000
 *     k[uci9] -> k[PAN] / k[uci9]
 [lch3o2_ho2]   CH3O2 + HO2 -> CH3OOH + O2                     ; 4.100E-13, 750
 [lch3o2_no]    CH3O2 + NO -> CH2O + HO2 + NO2                 ; 2.800E-12, 300
@@ -248,10 +261,27 @@ CHEMISTRY
 [usr_DMS_OH]  DMS + OH ->  .5 * SO2 + .5 * HO2
 [usr_SO2_OH]  SO2 + OH -> H2SO4
 [ldms_no3]    DMS + NO3 -> SO2 + HNO3            ; 1.9e-13,  520.
+
+
+* VBS SOAG reactions
+              SOAG0 + OH -> 1.15*SOAG15                                       ; 2e-11
+              SOAG15 + OH -> 1.15*SOAG24                                      ; 2e-11
+              SOAG24 + OH -> 0.46*SOAG33 + 0.5*SOAG35                         ; 2e-11
+
+              ISOP + OH ->   0.00272*SOAG32 + 0.00981*SOAG33 + 0.00218*SOAG34       ; 2.54e-11, 410
+              C10H16 + OH -> 0.14986*SOAG32 + 0.05450*SOAG33 + 0.09264*SOAG34     ; 1.2e-11, 444
+              ISOP + O3 -> 0.00327*SOAG33                                         ; 1.05e-14, -2000
+              C10H16 + O3 -> 0.04360*SOAG31 + 0.01035*SOAG32 + 0.09809*SOAG33 + 0.01635*SOAG34     ; 1.e-15, -732
+              ISOP + NO3 -> 0.00027*SOAG32 + 0.04060*SOAG33 + 0.06458*SOAG34      ; 3.03e-12,-446
+              C10H16 + NO3 -> 0.17493*SOAG33 + 0.59019*SOAG34                     ; 1.2e-12, 490
+
+              SOAG35 + OH -> 0.46*SOAG34  + 0.5*SOAG35      ; 2e-11
+              SOAG34 + OH -> 0.46*SOAG33  + 0.5*SOAG35      ; 2e-11
+              SOAG33 + OH -> 0.46*SOAG32  + 0.5*SOAG35      ; 2e-11
+              SOAG32 + OH -> 0.46*SOAG31  + 0.5*SOAG35      ; 2e-11
  End Reactions
 
  Ext Forcing
-      NO
       NO2 <- dataset
       SO2 <- dataset
       so4_a1 <- dataset
@@ -261,7 +291,7 @@ CHEMISTRY
       num_a1 <- dataset
       num_a2 <- dataset
       num_a4 <- dataset
-      SOAG <- dataset
+      SOAG0 <- dataset
  End Ext Forcing
 
 END CHEMISTRY
